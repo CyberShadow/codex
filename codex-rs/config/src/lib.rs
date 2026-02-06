@@ -20,6 +20,7 @@ pub mod shell_environment;
 mod skills_config;
 mod state;
 mod thread_config;
+mod tui_keymap;
 pub mod types;
 
 pub const CONFIG_TOML_FILE: &str = "config.toml";
