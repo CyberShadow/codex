@@ -217,6 +217,22 @@ impl TurnMetadataState {
             .and_then(|header| serde_json::from_str(&header).ok())
     }
 
+    pub(crate) async fn current_meta_value_after_git_enrichment(
+        &self,
+    ) -> Option<serde_json::Value> {
+        let task = {
+            let mut task_guard = self
+                .enrichment_task
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            task_guard.take()
+        };
+        if let Some(task) = task {
+            let _ = task.await;
+        }
+        self.current_meta_value()
+    }
+
     pub(crate) fn set_responsesapi_client_metadata(
         &self,
         responsesapi_client_metadata: HashMap<String, String>,
