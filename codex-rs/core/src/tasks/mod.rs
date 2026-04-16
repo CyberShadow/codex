@@ -131,15 +131,11 @@ fn git_workspaces_from_turn_metadata(
     }
 }
 
-async fn track_turn_git_metadata_analytics(sess: &Session, turn_context: &TurnContext) {
+fn track_turn_git_metadata_analytics(sess: &Session, turn_context: &TurnContext) {
     if !sess.enabled(Feature::GeneralAnalytics) {
         return;
     }
-    let Some(metadata) = turn_context
-        .turn_metadata_state
-        .current_meta_value_after_git_enrichment()
-        .await
-    else {
+    let Some(metadata) = turn_context.turn_metadata_state.current_meta_value() else {
         return;
     };
     let Some(git_workspaces) = git_workspaces_from_turn_metadata(metadata) else {
@@ -597,7 +593,7 @@ impl Session {
             .turn_timing_state
             .completed_at_and_duration_ms()
             .await;
-        track_turn_git_metadata_analytics(self, turn_context.as_ref()).await;
+        track_turn_git_metadata_analytics(self, turn_context.as_ref());
         turn_context
             .turn_metadata_state
             .cancel_git_enrichment_task();
