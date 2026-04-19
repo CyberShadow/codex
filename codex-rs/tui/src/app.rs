@@ -4541,6 +4541,7 @@ See the Codex keymap documentation for supported actions and examples."
                         |frame| {
                             self.chat_widget.render(frame.area(), frame.buffer);
                             if let Some((x, y)) = self.chat_widget.cursor_pos(frame.area()) {
+                                frame.set_cursor_style(self.chat_widget.cursor_style(frame.area()));
                                 frame.set_cursor_position((x, y));
                             }
                         },
@@ -6824,7 +6825,12 @@ See the Codex keymap documentation for supported actions and examples."
             return;
         }
 
-        if self.keymap.chat.edit_previous_message.is_pressed(key_event) {
+        if self.keymap.app.toggle_vim_mode.is_pressed(key_event) {
+            self.chat_widget.toggle_vim_mode_and_notify();
+            return;
+        }
+
+        if self.should_route_edit_previous_message(key_event) {
             // Esc primes/advances backtracking only in normal (not working) mode
             // with the composer focused and empty. In any other state, forward
             // Esc so the active UI (e.g. status indicator, modals, popups)
@@ -6892,6 +6898,11 @@ See the Codex keymap documentation for supported actions and examples."
                 self.chat_widget.handle_key_event(key_event);
             }
         };
+    }
+
+    fn should_route_edit_previous_message(&self, key_event: KeyEvent) -> bool {
+        self.keymap.chat.edit_previous_message.is_pressed(key_event)
+            && !self.chat_widget.should_handle_vim_insert_escape(key_event)
     }
 
     fn refresh_status_line(&mut self) {
@@ -12889,7 +12900,7 @@ guardian_approval = true
         }) as Arc<dyn HistoryCell>];
         app.overlay = Some(Overlay::new_transcript(
             app.transcript_cells.clone(),
-            crate::keymap::RuntimeKeymap::defaults().pager,
+            RuntimeKeymap::defaults().pager,
         ));
         app.deferred_history_lines = vec![Line::from("stale buffered line")];
         app.has_emitted_history_lines = true;
@@ -12910,6 +12921,29 @@ guardian_approval = true
         assert!(!app.backtrack_render_pending);
         assert_eq!(app.chat_widget.thread_id(), Some(thread_id));
         assert_eq!(app.chat_widget.composer_text_with_pending(), "draft prompt");
+    }
+
+    #[tokio::test]
+    async fn edit_previous_shortcut_does_not_steal_empty_vim_insert_escape() {
+        let mut app = make_test_app().await;
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+
+        assert!(app.chat_widget.composer_is_empty());
+        assert!(app.should_route_edit_previous_message(esc));
+
+        app.chat_widget.toggle_vim_mode_and_notify();
+        assert!(app.should_route_edit_previous_message(esc));
+
+        app.chat_widget
+            .handle_key_event(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+        assert!(app.chat_widget.should_handle_vim_insert_escape(esc));
+        assert!(!app.should_route_edit_previous_message(esc));
+
+        app.chat_widget.handle_key_event(esc);
+
+        assert!(!app.backtrack.primed);
+        assert!(!app.chat_widget.should_handle_vim_insert_escape(esc));
+        assert!(app.should_route_edit_previous_message(esc));
     }
 
     #[tokio::test]

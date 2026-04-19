@@ -1420,7 +1420,7 @@ mod tests {
     fn preserve_side_content_bg_keeps_rendered_background_colors() {
         let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
         let tx = AppEventSender::new(tx_raw);
-        let view = ListSelectionView::new(
+        let view = new_view(
             SelectionViewParams {
                 title: Some("Debug".to_string()),
                 items: vec![SelectionItem {
@@ -1439,7 +1439,6 @@ mod tests {
                 ..Default::default()
             },
             tx,
-            crate::keymap::RuntimeKeymap::defaults().list,
         );
         let area = Rect::new(0, 0, 120, 35);
         let mut buf = Buffer::empty(area);
@@ -1797,7 +1796,7 @@ mod tests {
     fn enter_with_no_matches_triggers_cancel_callback() {
         let (tx_raw, mut rx) = unbounded_channel::<AppEvent>();
         let tx = AppEventSender::new(tx_raw);
-        let mut view = ListSelectionView::new(
+        let mut view = new_view(
             SelectionViewParams {
                 items: vec![SelectionItem {
                     name: "Read Only".to_string(),
@@ -1811,7 +1810,6 @@ mod tests {
                 ..Default::default()
             },
             tx,
-            crate::keymap::RuntimeKeymap::defaults().list,
         );
         view.set_search_query("no-matches".to_string());
 
@@ -1829,7 +1827,7 @@ mod tests {
     fn move_down_without_selection_change_does_not_fire_callback() {
         let (tx_raw, mut rx) = unbounded_channel::<AppEvent>();
         let tx = AppEventSender::new(tx_raw);
-        let mut view = ListSelectionView::new(
+        let mut view = new_view(
             SelectionViewParams {
                 items: vec![SelectionItem {
                     name: "Only choice".to_string(),
@@ -1842,7 +1840,6 @@ mod tests {
                 ..Default::default()
             },
             tx,
-            crate::keymap::RuntimeKeymap::defaults().list,
         );
 
         while rx.try_recv().is_ok() {}
@@ -2150,7 +2147,7 @@ mod tests {
     fn side_layout_width_half_uses_exact_split() {
         let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
         let tx = AppEventSender::new(tx_raw);
-        let view = ListSelectionView::new(
+        let view = new_view(
             SelectionViewParams {
                 items: vec![SelectionItem {
                     name: "Item 1".to_string(),
@@ -2166,7 +2163,6 @@ mod tests {
                 ..Default::default()
             },
             tx,
-            crate::keymap::RuntimeKeymap::defaults().list,
         );
 
         let content_width: u16 = 120;
@@ -2178,7 +2174,7 @@ mod tests {
     fn side_layout_width_half_falls_back_when_list_would_be_too_narrow() {
         let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
         let tx = AppEventSender::new(tx_raw);
-        let view = ListSelectionView::new(
+        let view = new_view(
             SelectionViewParams {
                 items: vec![SelectionItem {
                     name: "Item 1".to_string(),
@@ -2194,7 +2190,6 @@ mod tests {
                 ..Default::default()
             },
             tx,
-            crate::keymap::RuntimeKeymap::defaults().list,
         );
 
         assert_eq!(view.side_layout_width(/*content_width*/ 80), None);
@@ -2204,7 +2199,7 @@ mod tests {
     fn stacked_side_content_is_used_when_side_by_side_does_not_fit() {
         let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
         let tx = AppEventSender::new(tx_raw);
-        let view = ListSelectionView::new(
+        let view = new_view(
             SelectionViewParams {
                 title: Some("Debug".to_string()),
                 items: vec![SelectionItem {
@@ -2225,7 +2220,6 @@ mod tests {
                 ..Default::default()
             },
             tx,
-            crate::keymap::RuntimeKeymap::defaults().list,
         );
 
         let rendered = render_lines_with_width(&view, /*width*/ 70);
@@ -2243,7 +2237,7 @@ mod tests {
     fn side_content_clearing_resets_symbols_and_style() {
         let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
         let tx = AppEventSender::new(tx_raw);
-        let view = ListSelectionView::new(
+        let view = new_view(
             SelectionViewParams {
                 title: Some("Debug".to_string()),
                 items: vec![SelectionItem {
@@ -2260,7 +2254,6 @@ mod tests {
                 ..Default::default()
             },
             tx,
-            crate::keymap::RuntimeKeymap::defaults().list,
         );
 
         let width = 120;
@@ -2303,7 +2296,7 @@ mod tests {
     fn side_content_clearing_handles_non_zero_buffer_origin() {
         let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
         let tx = AppEventSender::new(tx_raw);
-        let view = ListSelectionView::new(
+        let view = new_view(
             SelectionViewParams {
                 title: Some("Debug".to_string()),
                 items: vec![SelectionItem {
@@ -2320,7 +2313,6 @@ mod tests {
                 ..Default::default()
             },
             tx,
-            crate::keymap::RuntimeKeymap::defaults().list,
         );
 
         let width = 120;
