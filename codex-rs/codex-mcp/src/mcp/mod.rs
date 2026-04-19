@@ -36,6 +36,7 @@ use serde_json::Value;
 
 use crate::mcp_connection_manager::McpConnectionManager;
 use crate::mcp_connection_manager::McpRuntimeEnvironment;
+use crate::mcp_connection_manager::McpStartupTraceMetadata;
 use crate::mcp_connection_manager::codex_apps_tools_cache_key;
 pub type McpManager = McpConnectionManager;
 
@@ -370,6 +371,7 @@ pub async fn collect_mcp_snapshot_with_detail(
         config.codex_home.clone(),
         codex_apps_tools_cache_key(auth),
         tool_plugin_provenance,
+        McpStartupTraceMetadata::default(),
     )
     .await;
 
@@ -445,6 +447,7 @@ pub async fn collect_mcp_server_status_snapshot_with_detail(
         config.codex_home.clone(),
         codex_apps_tools_cache_key(auth),
         tool_plugin_provenance,
+        McpStartupTraceMetadata::default(),
     )
     .await;
 

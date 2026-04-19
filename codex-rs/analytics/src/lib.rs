@@ -21,6 +21,8 @@ pub use events::GuardianReviewUserAuthorization;
 pub use events::GuardianReviewedAction;
 pub use facts::AnalyticsJsonRpcError;
 pub use facts::AppInvocation;
+pub use facts::AppListEvent;
+pub use facts::AppListResult;
 pub use facts::CodexCompactionEvent;
 pub use facts::CodexTurnSteerEvent;
 pub use facts::CompactionImplementation;

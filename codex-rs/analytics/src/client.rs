@@ -6,6 +6,7 @@ use crate::events::current_runtime_metadata;
 use crate::facts::AnalyticsFact;
 use crate::facts::AnalyticsJsonRpcError;
 use crate::facts::AppInvocation;
+use crate::facts::AppListEvent;
 use crate::facts::AppMentionedInput;
 use crate::facts::AppUsedInput;
 use crate::facts::CustomAnalyticsFact;
@@ -196,6 +197,12 @@ impl AnalyticsEventsClient {
     pub fn track_hook_run(&self, tracking: TrackEventsContext, hook: HookRunFact) {
         self.record_fact(AnalyticsFact::Custom(CustomAnalyticsFact::HookRun(
             HookRunInput { tracking, hook },
+        )));
+    }
+
+    pub fn track_app_list(&self, event: AppListEvent) {
+        self.record_fact(AnalyticsFact::Custom(CustomAnalyticsFact::AppList(
+            Box::new(event),
         )));
     }
 
