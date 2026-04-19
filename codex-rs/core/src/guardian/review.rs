@@ -202,7 +202,9 @@ async fn run_guardian_review(
         .as_ref()
         .is_some_and(CancellationToken::is_cancelled)
     {
-        let result_tag = guardian_review_result_tag(None, None, true);
+        let result_tag = guardian_review_result_tag(
+            /*outcome*/ None, /*fail_closed_reason*/ None, /*aborted*/ true,
+        );
         session
             .send_event(
                 turn.as_ref(),
@@ -267,7 +269,11 @@ async fn run_guardian_review(
 
     let (assessment, result_tag, fail_closed_reason) = match outcome {
         GuardianReviewOutcome::Completed(Ok(assessment)) => {
-            let result_tag = guardian_review_result_tag(Some(assessment.outcome), None, false);
+            let result_tag = guardian_review_result_tag(
+                Some(assessment.outcome),
+                /*fail_closed_reason*/ None,
+                /*aborted*/ false,
+            );
             (assessment, result_tag, None)
         }
         GuardianReviewOutcome::Completed(Err(err)) => (
@@ -280,7 +286,7 @@ async fn run_guardian_review(
             guardian_review_result_tag(
                 Some(GuardianAssessmentOutcome::Deny),
                 Some("denied_error"),
-                false,
+                /*aborted*/ false,
             ),
             Some("denied_error"),
         ),
@@ -327,7 +333,9 @@ async fn run_guardian_review(
             return ReviewDecision::TimedOut;
         }
         GuardianReviewOutcome::Aborted => {
-            let result_tag = guardian_review_result_tag(None, None, true);
+            let result_tag = guardian_review_result_tag(
+                /*outcome*/ None, /*fail_closed_reason*/ None, /*aborted*/ true,
+            );
             review_span.record("result", result_tag);
             drop(review_span);
             session
@@ -456,8 +464,8 @@ pub(crate) async fn review_approval_request(
         request,
         GuardianApprovalRequestSource::MainTurn,
         retry_reason,
-        None,
-        None,
+        /*external_cancel*/ None,
+        /*parent_trace*/ None,
     ))
     .await
 }
@@ -477,7 +485,7 @@ pub(crate) async fn review_approval_request_with_cancel(
         review_id,
         request,
         retry_reason,
-        None,
+        /*parent_trace*/ None,
         cancel_token,
     )
     .await

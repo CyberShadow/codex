@@ -353,7 +353,7 @@ mod job {
                 stage_one_context.reasoning_summary,
                 stage_one_context.service_tier,
                 stage_one_context.turn_metadata_header.as_deref(),
-                None,
+                /*fallback_request_trace*/ None,
             )
             .await?;
 
