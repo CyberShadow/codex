@@ -563,7 +563,10 @@ impl RuntimeKeymap {
                         KeyModifiers::CONTROL | KeyModifiers::ALT,
                     ))
                 ],
-                delete_forward_word: default_bindings![alt(KeyCode::Char('d')), alt(KeyCode::Delete)],
+                delete_forward_word: default_bindings![
+                    alt(KeyCode::Char('d')),
+                    alt(KeyCode::Delete)
+                ],
                 kill_line_start: default_bindings![ctrl(KeyCode::Char('u'))],
                 kill_line_end: default_bindings![ctrl(KeyCode::Char('k'))],
                 yank: default_bindings![ctrl(KeyCode::Char('y'))],
@@ -592,7 +595,10 @@ impl RuntimeKeymap {
                 move_word_backward: default_bindings![plain(KeyCode::Char('b'))],
                 move_word_end: default_bindings![plain(KeyCode::Char('e'))],
                 move_line_start: default_bindings![plain(KeyCode::Char('0'))],
-                move_line_end: default_bindings![plain(KeyCode::Char('$')), shift(KeyCode::Char('$'))],
+                move_line_end: default_bindings![
+                    plain(KeyCode::Char('$')),
+                    shift(KeyCode::Char('$'))
+                ],
                 delete_char: default_bindings![plain(KeyCode::Char('x'))],
                 delete_to_line_end: default_bindings![
                     shift(KeyCode::Char('d')),
