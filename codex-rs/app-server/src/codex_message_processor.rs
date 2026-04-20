@@ -2529,7 +2529,7 @@ impl CodexMessageProcessor {
         );
 
         if requested_cwd.is_some()
-            && !config.active_project.is_trusted()
+            && config.active_project.trust_level.is_none()
             && (requested_sandbox_trusts_project
                 || matches!(
                     config.permissions.sandbox_policy.get(),
