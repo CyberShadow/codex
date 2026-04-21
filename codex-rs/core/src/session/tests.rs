@@ -3088,6 +3088,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_zsh_path() {
                 .expect("create environment"),
         )),
         /*analytics_events_client*/ None,
+        /*inherited_rollout_trace*/ None,
     )
     .await;
 
@@ -3210,6 +3211,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
             ..HooksConfig::default()
         }),
         rollout: Mutex::new(None),
+        rollout_trace: None,
         user_shell: Arc::new(default_user_shell()),
         agent_identity_manager: Arc::new(crate::agent_identity::AgentIdentityManager::new(
             config.as_ref(),
@@ -3411,6 +3413,7 @@ async fn make_session_with_config_and_rx(
                 .expect("create environment"),
         )),
         /*analytics_events_client*/ None,
+        /*inherited_rollout_trace*/ None,
     )
     .await?;
 
@@ -4313,6 +4316,7 @@ where
             ..HooksConfig::default()
         }),
         rollout: Mutex::new(None),
+        rollout_trace: None,
         user_shell: Arc::new(default_user_shell()),
         agent_identity_manager: Arc::new(crate::agent_identity::AgentIdentityManager::new(
             config.as_ref(),
