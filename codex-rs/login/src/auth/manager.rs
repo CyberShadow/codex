@@ -1555,10 +1555,15 @@ impl AuthManager {
         let token_data = auth
             .get_token_data()
             .context("ChatGPT token data is not available")?;
-        let workspace_id = self
-            .forced_chatgpt_workspace_id()
-            .filter(|value| !value.is_empty())
-            .or(token_data.account_id.filter(|value| !value.is_empty()));
+        let token_account_id = token_data.account_id.filter(|value| !value.is_empty());
+        let forced_account_id = self.forced_chatgpt_workspace_id().and_then(|values| {
+            let mut values = values.into_iter().filter(|value| !value.is_empty());
+            match token_account_id.as_ref() {
+                Some(account_id) => values.find(|value| value == account_id),
+                None => values.next(),
+            }
+        });
+        let workspace_id = forced_account_id.or(token_account_id);
 
         let Some(workspace_id) = workspace_id else {
             return Ok(None);
