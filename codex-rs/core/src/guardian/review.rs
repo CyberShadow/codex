@@ -10,6 +10,7 @@ use codex_protocol::protocol::GuardianRiskLevel;
 use codex_protocol::protocol::GuardianUserAuthorization;
 use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::protocol::SubAgentSource;
+use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::WarningEvent;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -22,6 +23,7 @@ use super::GuardianApprovalRequest;
 use super::GuardianAssessment;
 use super::GuardianAssessmentOutcome;
 use super::GuardianRejection;
+use super::GuardianRejectionCircuitBreakerAction;
 use super::approval_request::guardian_assessment_action;
 use super::approval_request::guardian_request_target_item_id;
 use super::approval_request::guardian_request_turn_id;
@@ -110,6 +112,60 @@ pub(crate) fn is_guardian_reviewer_source(
     )
 }
 
+async fn record_guardian_non_denial(session: &Arc<Session>, turn_id: &str) {
+    session
+        .services
+        .guardian_rejection_circuit_breaker
+        .lock()
+        .await
+        .record_non_denial(turn_id);
+}
+
+async fn record_guardian_denial(session: &Arc<Session>, turn: &Arc<TurnContext>, turn_id: &str) {
+    let action = session
+        .services
+        .guardian_rejection_circuit_breaker
+        .lock()
+        .await
+        .record_denial(turn_id);
+    let GuardianRejectionCircuitBreakerAction::InterruptTurn {
+        consecutive_denials,
+        total_denials,
+    } = action
+    else {
+        return;
+    };
+
+    if session.turn_context_for_sub_id(turn_id).await.is_none() {
+        return;
+    }
+
+    session
+        .send_event(
+            turn.as_ref(),
+            EventMsg::Warning(WarningEvent {
+                message: format!(
+                    "Automatic approval review rejected too many approval requests for this turn ({consecutive_denials} consecutive, {total_denials} total); interrupting the turn."
+                ),
+            }),
+        )
+        .await;
+
+    let session = Arc::clone(session);
+    let _abort_task = tokio::spawn(async move {
+        session.abort_all_tasks(TurnAbortReason::Interrupted).await;
+    });
+}
+
+#[cfg(test)]
+pub(crate) async fn record_guardian_denial_for_test(
+    session: &Arc<Session>,
+    turn: &Arc<TurnContext>,
+    turn_id: &str,
+) {
+    record_guardian_denial(session, turn, turn_id).await;
+}
+
 /// This function always fails closed: timeouts, review-session failures, and
 /// parse failures all block execution, but timeouts are still surfaced to the
 /// caller as distinct from explicit guardian denials.
@@ -151,7 +207,7 @@ async fn run_guardian_review(
                 EventMsg::GuardianAssessment(GuardianAssessmentEvent {
                     id: review_id,
                     target_item_id,
-                    turn_id: assessment_turn_id,
+                    turn_id: assessment_turn_id.clone(),
                     status: GuardianAssessmentStatus::Aborted,
                     risk_level: None,
                     user_authorization: None,
@@ -161,6 +217,7 @@ async fn run_guardian_review(
                 }),
             )
             .await;
+        record_guardian_non_denial(&session, &assessment_turn_id).await;
         return ReviewDecision::Abort;
     }
 
@@ -176,14 +233,21 @@ async fn run_guardian_review(
     ))
     .await;
 
-    let assessment = match outcome {
-        GuardianReviewOutcome::Completed(Ok(assessment)) => assessment,
-        GuardianReviewOutcome::Completed(Err(err)) => GuardianAssessment {
-            risk_level: GuardianRiskLevel::High,
-            user_authorization: GuardianUserAuthorization::Unknown,
-            outcome: GuardianAssessmentOutcome::Deny,
-            rationale: format!("Automatic approval review failed: {err}"),
-        },
+    let (assessment, count_denial_for_circuit_breaker) = match outcome {
+        GuardianReviewOutcome::Completed(Ok(assessment)) => {
+            let count_denial_for_circuit_breaker =
+                matches!(assessment.outcome, GuardianAssessmentOutcome::Deny);
+            (assessment, count_denial_for_circuit_breaker)
+        }
+        GuardianReviewOutcome::Completed(Err(err)) => (
+            GuardianAssessment {
+                risk_level: GuardianRiskLevel::High,
+                user_authorization: GuardianUserAuthorization::Unknown,
+                outcome: GuardianAssessmentOutcome::Deny,
+                rationale: format!("Automatic approval review failed: {err}"),
+            },
+            false,
+        ),
         GuardianReviewOutcome::TimedOut => {
             let rationale =
                 "Automatic approval review timed out while evaluating the requested approval."
@@ -202,7 +266,7 @@ async fn run_guardian_review(
                     EventMsg::GuardianAssessment(GuardianAssessmentEvent {
                         id: review_id,
                         target_item_id,
-                        turn_id: assessment_turn_id,
+                        turn_id: assessment_turn_id.clone(),
                         status: GuardianAssessmentStatus::TimedOut,
                         risk_level: None,
                         user_authorization: None,
@@ -212,6 +276,7 @@ async fn run_guardian_review(
                     }),
                 )
                 .await;
+            record_guardian_non_denial(&session, &assessment_turn_id).await;
             return ReviewDecision::TimedOut;
         }
         GuardianReviewOutcome::Aborted => {
@@ -221,7 +286,7 @@ async fn run_guardian_review(
                     EventMsg::GuardianAssessment(GuardianAssessmentEvent {
                         id: review_id,
                         target_item_id,
-                        turn_id: assessment_turn_id,
+                        turn_id: assessment_turn_id.clone(),
                         status: GuardianAssessmentStatus::Aborted,
                         risk_level: None,
                         user_authorization: None,
@@ -231,6 +296,7 @@ async fn run_guardian_review(
                     }),
                 )
                 .await;
+            record_guardian_non_denial(&session, &assessment_turn_id).await;
             return ReviewDecision::Abort;
         }
     };
@@ -280,7 +346,7 @@ async fn run_guardian_review(
             EventMsg::GuardianAssessment(GuardianAssessmentEvent {
                 id: review_id,
                 target_item_id,
-                turn_id: assessment_turn_id,
+                turn_id: assessment_turn_id.clone(),
                 status,
                 risk_level: Some(assessment.risk_level),
                 user_authorization: Some(assessment.user_authorization),
@@ -290,6 +356,12 @@ async fn run_guardian_review(
             }),
         )
         .await;
+
+    if count_denial_for_circuit_breaker {
+        record_guardian_denial(&session, &turn, &assessment_turn_id).await;
+    } else {
+        record_guardian_non_denial(&session, &assessment_turn_id).await;
+    }
 
     if approved {
         ReviewDecision::Approved
