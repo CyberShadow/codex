@@ -3,6 +3,8 @@
 use codex_arg0::Arg0DispatchPaths;
 use codex_cloud_requirements::cloud_requirements_loader;
 use codex_config::NoopThreadConfigLoader;
+use codex_config::RemoteThreadConfigLoader;
+use codex_config::ThreadConfigLoader;
 use codex_core::config::Config;
 use codex_core::config::ConfigBuilder;
 use codex_core::config_loader::CloudRequirementsLoader;
@@ -106,6 +108,13 @@ enum LogFormat {
 }
 
 type StderrLogLayer = Box<dyn Layer<Registry> + Send + Sync + 'static>;
+
+fn configured_thread_config_loader(config: &Config) -> Arc<dyn ThreadConfigLoader> {
+    match config.experimental_thread_config_endpoint.as_deref() {
+        Some(endpoint) => Arc::new(RemoteThreadConfigLoader::new(endpoint)),
+        None => Arc::new(NoopThreadConfigLoader),
+    }
+}
 
 /// Control-plane messages from the processor/transport side to the outbound router task.
 ///
@@ -420,9 +429,8 @@ pub async fn run_main_with_transport(
         }
     };
     let loader_overrides_for_config_api = loader_overrides.clone();
-    let thread_config_loader = Arc::new(NoopThreadConfigLoader);
     let mut config_warnings = Vec::new();
-    let config = match ConfigBuilder::default()
+    let mut config = match ConfigBuilder::default()
         .cli_overrides(cli_kv_overrides.clone())
         .loader_overrides(loader_overrides)
         .cloud_requirements(cloud_requirements.clone())
@@ -443,6 +451,28 @@ pub async fn run_main_with_transport(
                 })?
         }
     };
+    let thread_config_loader = configured_thread_config_loader(&config);
+    if config.experimental_thread_config_endpoint.is_some() {
+        match ConfigBuilder::default()
+            .cli_overrides(cli_kv_overrides.clone())
+            .loader_overrides(loader_overrides_for_config_api.clone())
+            .cloud_requirements(cloud_requirements.clone())
+            .thread_config_loader(Arc::clone(&thread_config_loader))
+            .build()
+            .await
+        {
+            Ok(config_with_thread_config) => {
+                config = config_with_thread_config;
+            }
+            Err(err) => {
+                let message = config_warning_from_error(
+                    "Invalid remote thread configuration; using local config.",
+                    &err,
+                );
+                config_warnings.push(message);
+            }
+        }
+    }
 
     if let Ok(Some(err)) = check_execpolicy_for_warnings(&config.config_layer_stack).await {
         let (path, range) = exec_policy_warning_location(&err);
