@@ -1609,7 +1609,7 @@ async fn make_rmcp_client(
                             "remote MCP server `{server_name}` requires an executor client"
                         ))
                     })?;
-                return RmcpClient::new_environment_streamable_http_client(
+                return RmcpClient::new_remote_streamable_http_client(
                     server_name,
                     &url,
                     resolved_bearer_token,
