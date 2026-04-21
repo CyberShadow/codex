@@ -181,7 +181,7 @@ impl TracingHarness {
             .process_request(
                 TEST_CONNECTION_ID,
                 request,
-                AppServerTransport::Stdio,
+                &AppServerTransport::Stdio,
                 Arc::clone(&self.session),
             )
             .await;
