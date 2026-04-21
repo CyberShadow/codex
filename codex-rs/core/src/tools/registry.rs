@@ -11,6 +11,7 @@ use crate::memories::usage::emit_metric_for_tool_read;
 use crate::sandbox_tags::sandbox_tag;
 use crate::session::turn_context::TurnContext;
 use crate::tools::context::FunctionToolOutput;
+use crate::tools::context::ToolCallSource;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
@@ -25,6 +26,12 @@ use codex_hooks::HookToolKind;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::SandboxPolicy;
+use codex_rollout_trace::ExecutionStatus;
+use codex_rollout_trace::ToolCallKind;
+use codex_rollout_trace::ToolDispatchRequester;
+use codex_rollout_trace::ToolDispatchResult;
+use codex_rollout_trace::ToolDispatchStart;
+use codex_rollout_trace::ToolDispatchTraceContext;
 use codex_tools::ConfiguredToolSpec;
 use codex_tools::ToolName;
 use codex_tools::ToolSpec;
@@ -80,6 +87,16 @@ pub trait ToolHandler: Send + Sync {
     /// Creates an optional consumer for streamed tool argument diffs.
     fn create_diff_consumer(&self) -> Option<Box<dyn ToolArgumentDiffConsumer>> {
         None
+    }
+
+    /// Returns `true` when this handler is represented by a trace object other
+    /// than `ToolCall`.
+    ///
+    /// Protocol events are runtime observations on the `ToolCall`; they do not
+    /// suppress the canonical tool boundary. The public code-mode `exec` tool is
+    /// the exception because `CodeCell` owns that model-visible boundary.
+    fn uses_first_class_trace_object(&self, _invocation: &ToolInvocation) -> bool {
+        false
     }
 
     /// Perform the actual [ToolInvocation] and returns a [ToolOutput] containing
@@ -168,6 +185,8 @@ trait AnyToolHandler: Send + Sync {
 
     fn create_diff_consumer(&self) -> Option<Box<dyn ToolArgumentDiffConsumer>>;
 
+    fn uses_first_class_trace_object(&self, invocation: &ToolInvocation) -> bool;
+
     fn handle_any<'a>(
         &'a self,
         invocation: ToolInvocation,
@@ -203,6 +222,10 @@ where
         ToolHandler::create_diff_consumer(self)
     }
 
+    fn uses_first_class_trace_object(&self, invocation: &ToolInvocation) -> bool {
+        ToolHandler::uses_first_class_trace_object(self, invocation)
+    }
+
     fn handle_any<'a>(
         &'a self,
         invocation: ToolInvocation,
@@ -222,6 +245,168 @@ where
 
 pub struct ToolRegistry {
     handlers: HashMap<ToolName, Arc<dyn AnyToolHandler>>,
+}
+
+/// No-op capable trace handle for one resolved tool dispatch.
+///
+/// The registry has several early-return paths after a handler is selected:
+/// pre-use hooks, handler execution, after-use hooks, and result status all
+/// affect the trace lifecycle. Keeping the trace eligibility and event writes
+/// behind this helper makes those paths say what happened instead of repeating
+/// the Direct/CodeMode/JsRepl/first-class-object policy at each branch.
+struct DispatchTrace {
+    context: ToolDispatchTraceContext,
+}
+
+impl DispatchTrace {
+    fn new(invocation: &ToolInvocation, handler: &dyn AnyToolHandler) -> Self {
+        let start = (!handler.uses_first_class_trace_object(invocation))
+            .then(|| tool_dispatch_start(invocation))
+            .flatten();
+        let context = invocation
+            .session
+            .services
+            .rollout_trace
+            .start_tool_dispatch_trace(start);
+        Self { context }
+    }
+
+    fn record_completed(&self, invocation: &ToolInvocation, result: &AnyToolResult) {
+        let Some(result_payload) = tool_dispatch_result(invocation, result) else {
+            return;
+        };
+        let status = if result.result.success_for_logging() {
+            ExecutionStatus::Completed
+        } else {
+            ExecutionStatus::Failed
+        };
+        self.context.record_completed(status, result_payload);
+    }
+
+    fn record_failed(&self, error: &FunctionCallError) {
+        self.context.record_failed(error);
+    }
+}
+
+fn tool_dispatch_start(invocation: &ToolInvocation) -> Option<ToolDispatchStart> {
+    let requester = match &invocation.source {
+        ToolCallSource::Direct => ToolDispatchRequester::Model {
+            model_visible_call_id: invocation.call_id.clone(),
+        },
+        ToolCallSource::CodeMode {
+            cell_id,
+            runtime_tool_call_id,
+        } => ToolDispatchRequester::CodeCell {
+            runtime_cell_id: cell_id.clone(),
+            runtime_tool_call_id: runtime_tool_call_id.clone(),
+        },
+        ToolCallSource::JsRepl => return None,
+    };
+
+    Some(ToolDispatchStart {
+        thread_id: invocation.session.conversation_id.to_string(),
+        codex_turn_id: invocation.turn.sub_id.clone(),
+        tool_call_id: invocation.call_id.clone(),
+        tool_name: invocation.tool_name.name.clone(),
+        tool_namespace: invocation.tool_name.namespace.clone(),
+        requester,
+        kind: dispatched_tool_kind(invocation),
+        label: dispatched_tool_label(invocation),
+        input_preview: Some(truncate_preview(&invocation.payload.log_payload())),
+        payload: dispatched_tool_payload(&invocation.payload),
+    })
+}
+
+fn tool_dispatch_result(
+    invocation: &ToolInvocation,
+    result: &AnyToolResult,
+) -> Option<ToolDispatchResult> {
+    match invocation.source {
+        ToolCallSource::Direct => Some(ToolDispatchResult::DirectResponse {
+            response_item: result
+                .result
+                .to_response_item(&result.call_id, &result.payload),
+        }),
+        ToolCallSource::CodeMode { .. } => Some(ToolDispatchResult::CodeModeResponse {
+            value: result.result.code_mode_result(&result.payload),
+        }),
+        ToolCallSource::JsRepl => None,
+    }
+}
+
+fn dispatched_tool_kind(invocation: &ToolInvocation) -> ToolCallKind {
+    if let ToolPayload::Mcp { server, tool, .. } = &invocation.payload {
+        return ToolCallKind::Mcp {
+            server: server.clone(),
+            tool: tool.clone(),
+        };
+    }
+
+    match invocation.tool_name.name.as_str() {
+        "exec_command" | "local_shell" | "shell" | "shell_command" => ToolCallKind::ExecCommand,
+        "write_stdin" => ToolCallKind::WriteStdin,
+        "apply_patch" => ToolCallKind::ApplyPatch,
+        "web_search" | "web_search_preview" => ToolCallKind::Web,
+        "image_generation" | "image_query" => ToolCallKind::ImageGeneration,
+        "spawn_agent" => ToolCallKind::SpawnAgent,
+        "send_message" => ToolCallKind::SendMessage,
+        "followup_task" => ToolCallKind::AssignAgentTask,
+        "wait_agent" => ToolCallKind::WaitAgent,
+        "close_agent" => ToolCallKind::CloseAgent,
+        other => ToolCallKind::Other {
+            name: other.to_string(),
+        },
+    }
+}
+
+fn dispatched_tool_label(invocation: &ToolInvocation) -> String {
+    if let ToolPayload::Mcp { server, tool, .. } = &invocation.payload {
+        return format!("mcp:{server}:{tool}");
+    }
+
+    invocation.tool_name.to_string()
+}
+
+fn dispatched_tool_payload(payload: &ToolPayload) -> serde_json::Value {
+    match payload {
+        ToolPayload::Function { arguments } => serde_json::json!({
+            "type": "function",
+            "arguments": arguments,
+        }),
+        ToolPayload::ToolSearch { arguments } => serde_json::json!({
+            "type": "tool_search",
+            "arguments": arguments,
+        }),
+        ToolPayload::Custom { input } => serde_json::json!({
+            "type": "custom",
+            "input": input,
+        }),
+        ToolPayload::LocalShell { params } => serde_json::json!({
+            "type": "local_shell",
+            "command": params.command,
+            "workdir": params.workdir,
+            "timeout_ms": params.timeout_ms,
+        }),
+        ToolPayload::Mcp {
+            server,
+            tool,
+            raw_arguments,
+        } => serde_json::json!({
+            "type": "mcp",
+            "server": server,
+            "tool": tool,
+            "raw_arguments": raw_arguments,
+        }),
+    }
+}
+
+fn truncate_preview(value: &str) -> String {
+    const MAX_PREVIEW_CHARS: usize = 160;
+    let mut preview = value.chars().take(MAX_PREVIEW_CHARS).collect::<String>();
+    if value.chars().count() > MAX_PREVIEW_CHARS {
+        preview.push_str("...");
+    }
+    preview
 }
 
 impl ToolRegistry {
@@ -339,6 +524,8 @@ impl ToolRegistry {
             return Err(FunctionCallError::Fatal(message));
         }
 
+        let dispatch_trace = DispatchTrace::new(&invocation, handler.as_ref());
+
         if let Some(pre_tool_use_payload) = handler.pre_tool_use_payload(&invocation)
             && let Some(reason) = run_pre_tool_use_hooks(
                 &invocation.session,
@@ -350,10 +537,12 @@ impl ToolRegistry {
             )
             .await
         {
-            return Err(FunctionCallError::RespondToModel(format!(
+            let err = FunctionCallError::RespondToModel(format!(
                 "Command blocked by PreToolUse hook: {reason}. Command: {}",
                 pre_tool_use_payload.command
-            )));
+            ));
+            dispatch_trace.record_failed(&err);
+            return Err(err);
         }
 
         let is_mutating = handler.is_mutating(&invocation).await;
@@ -438,6 +627,7 @@ impl ToolRegistry {
         .await;
 
         if let Some(err) = hook_abort_error {
+            dispatch_trace.record_failed(&err);
             return Err(err);
         }
 
@@ -477,9 +667,13 @@ impl ToolRegistry {
                 let result = guard.take().ok_or_else(|| {
                     FunctionCallError::Fatal("tool produced no output".to_string())
                 })?;
+                dispatch_trace.record_completed(&invocation, &result);
                 Ok(result)
             }
-            Err(err) => Err(err),
+            Err(err) => {
+                dispatch_trace.record_failed(&err);
+                Err(err)
+            }
         }
     }
 }

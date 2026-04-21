@@ -215,6 +215,7 @@ async fn exec_command_pre_tool_use_payload_uses_raw_command() {
             tracker: Arc::new(Mutex::new(TurnDiffTracker::new())),
             call_id: "call-43".to_string(),
             tool_name: codex_tools::ToolName::plain("exec_command"),
+            source: crate::tools::context::ToolCallSource::Direct,
             payload,
         }),
         Some(crate::tools::registry::PreToolUsePayload {
@@ -240,6 +241,7 @@ async fn exec_command_pre_tool_use_payload_skips_write_stdin() {
             tracker: Arc::new(Mutex::new(TurnDiffTracker::new())),
             call_id: "call-44".to_string(),
             tool_name: codex_tools::ToolName::plain("write_stdin"),
+            source: crate::tools::context::ToolCallSource::Direct,
             payload,
         }),
         None
