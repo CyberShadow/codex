@@ -1456,6 +1456,18 @@ impl Session {
     /// Persist the event to rollout and send it to clients.
     pub(crate) async fn send_event(&self, turn_context: &TurnContext, msg: EventMsg) {
         let legacy_source = msg.clone();
+        if let Some(rollout_trace) = &self.services.rollout_trace {
+            rollout_trace.record_codex_turn_event(
+                self.conversation_id.to_string(),
+                &turn_context.sub_id,
+                &legacy_source,
+            );
+            rollout_trace.record_tool_call_event(
+                self.conversation_id.to_string(),
+                turn_context.sub_id.clone(),
+                &legacy_source,
+            );
+        }
         let event = Event {
             id: turn_context.sub_id.clone(),
             msg,
@@ -1508,13 +1520,19 @@ impl Session {
             return;
         }
 
-        self.forward_child_completion_to_parent(*parent_thread_id, child_agent_path, status)
-            .await;
+        self.forward_child_completion_to_parent(
+            turn_context,
+            *parent_thread_id,
+            child_agent_path,
+            status,
+        )
+        .await;
     }
 
     /// Sends the standard completion envelope from a spawned MultiAgentV2 child to its parent.
     async fn forward_child_completion_to_parent(
         &self,
+        turn_context: &TurnContext,
         parent_thread_id: ThreadId,
         child_agent_path: &codex_protocol::AgentPath,
         status: AgentStatus,
@@ -1532,9 +1550,19 @@ impl Session {
             child_agent_path.clone(),
             parent_agent_path,
             Vec::new(),
-            message,
+            message.clone(),
             /*trigger_turn*/ false,
         );
+        if let Some(rollout_trace) = &self.services.rollout_trace {
+            rollout_trace.record_agent_result_interaction(
+                self.conversation_id.to_string(),
+                turn_context.sub_id.clone(),
+                parent_thread_id.to_string(),
+                child_agent_path.as_str(),
+                &message,
+                &status,
+            );
+        }
         if let Err(err) = self
             .services
             .agent_control
@@ -1573,6 +1601,9 @@ impl Session {
         // Persist the event into rollout (recorder filters as needed)
         let rollout_items = vec![RolloutItem::EventMsg(event.msg.clone())];
         self.persist_rollout_items(&rollout_items).await;
+        if let Some(rollout_trace) = &self.services.rollout_trace {
+            rollout_trace.record_protocol_event(&event.msg);
+        }
         self.deliver_event_raw(event).await;
     }
 

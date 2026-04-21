@@ -8,6 +8,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::agent::AgentStatus;
 use crate::tools::context::ToolCallSource;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
@@ -15,10 +16,11 @@ use crate::tools::context::ToolPayload;
 use codex_protocol::ThreadId;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
-#[cfg(test)]
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::ExecCommandSource;
+use codex_protocol::protocol::ExecCommandStatus;
+use codex_protocol::protocol::PatchApplyStatus;
 use codex_protocol::protocol::SessionSource;
-#[cfg(test)]
 use codex_protocol::protocol::TurnAbortReason;
 use codex_rollout_trace::AgentThreadId;
 use codex_rollout_trace::CodeCellRuntimeStatus;
@@ -32,6 +34,7 @@ use codex_rollout_trace::RawPayloadRef;
 use codex_rollout_trace::RawToolCallRequester;
 use codex_rollout_trace::RawTraceEventContext;
 use codex_rollout_trace::RawTraceEventPayload;
+use codex_rollout_trace::RolloutStatus;
 use codex_rollout_trace::ToolCallKind;
 use codex_rollout_trace::ToolCallSummary;
 use codex_rollout_trace::TraceWriter;
@@ -54,6 +57,7 @@ pub(crate) const CODEX_ROLLOUT_TRACE_ROOT_ENV: &str = "CODEX_ROLLOUT_TRACE_ROOT"
 #[derive(Clone, Debug)]
 pub(crate) struct RolloutTraceRecorder {
     writer: Arc<TraceWriter>,
+    root_thread_id: AgentThreadId,
 }
 
 /// Metadata captured once at thread/session start.
@@ -123,6 +127,14 @@ struct CodeCellResponseTracePayload<'a> {
     response: &'a codex_code_mode::RuntimeResponse,
 }
 
+/// Trace-only payload for the notification a finished child sends back to its parent.
+#[derive(Serialize)]
+struct AgentResultTracePayload<'a> {
+    child_agent_path: &'a str,
+    message: &'a str,
+    status: &'a AgentStatus,
+}
+
 impl RolloutTraceRecorder {
     /// Creates and starts a trace bundle if `CODEX_ROLLOUT_TRACE_ROOT` is set.
     ///
@@ -160,6 +172,7 @@ impl RolloutTraceRecorder {
         )?;
         let recorder = Self {
             writer: Arc::new(writer),
+            root_thread_id: thread_id.clone(),
         };
 
         recorder.append_best_effort(RawTraceEventPayload::RolloutStarted {
@@ -182,6 +195,26 @@ impl RolloutTraceRecorder {
         Self::create_in_root(root, thread_id, metadata)
     }
 
+    /// Wraps selected UI/protocol events in the trace bundle.
+    ///
+    /// We intentionally skip high-volume stream deltas here. Inference/tool
+    /// hooks emit typed raw events; protocol wrappers are debug breadcrumbs, not
+    /// the canonical transcript.
+    pub(crate) fn record_protocol_event(&self, event: &EventMsg) {
+        let Some(event_type) = wrapped_protocol_event_type(event) else {
+            return;
+        };
+        let event_payload =
+            match self.write_json_payload_best_effort(RawPayloadKind::ProtocolEvent, event) {
+                Some(event_payload) => event_payload,
+                None => return,
+            };
+        self.append_best_effort(RawTraceEventPayload::ProtocolEventObserved {
+            event_type: event_type.to_string(),
+            event_payload,
+        });
+    }
+
     /// Emits the lifecycle event and metadata for one thread in this rollout tree.
     ///
     /// Root sessions call this immediately after `RolloutStarted`; spawned
@@ -199,7 +232,6 @@ impl RolloutTraceRecorder {
     }
 
     /// Emits typed turn lifecycle events from the UI/protocol lifecycle.
-    #[cfg(test)]
     pub(crate) fn record_codex_turn_event(
         &self,
         thread_id: AgentThreadId,
@@ -243,6 +275,23 @@ impl RolloutTraceRecorder {
             }
             _ => {}
         }
+    }
+
+    /// Emits typed runtime tool events from existing protocol lifecycle events.
+    ///
+    /// The protocol event stays separate from the caller-facing invocation and
+    /// result payloads. Reducers attach it to `ToolCall.raw_runtime_payload_ids`
+    /// and can also use it to build richer objects such as terminal operations.
+    pub(crate) fn record_tool_call_event(
+        &self,
+        thread_id: AgentThreadId,
+        codex_turn_id: String,
+        event: &EventMsg,
+    ) {
+        let Some(payload) = self.tool_call_trace_payload(event) else {
+            return;
+        };
+        self.append_with_context_best_effort(thread_id, codex_turn_id, payload);
     }
 
     /// Emits the parent runtime object for one model-authored code-mode cell.
@@ -474,6 +523,60 @@ impl RolloutTraceRecorder {
         );
     }
 
+    /// Emits the v2 child-to-parent completion message as an explicit graph edge.
+    ///
+    /// This notification is not a tool call in the child: it is runtime delivery
+    /// from the completed child turn into the parent's mailbox. Without a
+    /// trace-owned edge the viewer would have to infer the relationship from a
+    /// later parent prompt snapshot, which loses the runtime timing and source.
+    pub(crate) fn record_agent_result_interaction(
+        &self,
+        child_thread_id: AgentThreadId,
+        child_codex_turn_id: String,
+        parent_thread_id: AgentThreadId,
+        child_agent_path: &str,
+        message: &str,
+        status: &AgentStatus,
+    ) {
+        let carried_payload = self.write_json_payload_best_effort(
+            RawPayloadKind::AgentResult,
+            &AgentResultTracePayload {
+                child_agent_path,
+                message,
+                status,
+            },
+        );
+        self.append_with_context_best_effort(
+            child_thread_id.clone(),
+            child_codex_turn_id.clone(),
+            RawTraceEventPayload::AgentResultObserved {
+                edge_id: format!(
+                    "edge:agent_result:{child_thread_id}:{child_codex_turn_id}:{parent_thread_id}"
+                ),
+                child_thread_id,
+                child_codex_turn_id,
+                parent_thread_id,
+                message: message.to_string(),
+                carried_payload,
+            },
+        );
+    }
+
+    /// Emits terminal trace events for graceful session shutdown.
+    ///
+    /// Child agent sessions share their root recorder, so ending a child thread
+    /// must not close the whole rollout. Only the root thread's shutdown emits
+    /// `RolloutEnded`.
+    pub(crate) fn record_thread_ended(&self, thread_id: AgentThreadId, status: RolloutStatus) {
+        self.append_best_effort(RawTraceEventPayload::ThreadEnded {
+            thread_id: thread_id.clone(),
+            status: status.clone(),
+        });
+        if thread_id == self.root_thread_id {
+            self.append_best_effort(RawTraceEventPayload::RolloutEnded { status });
+        }
+    }
+
     fn write_json_payload_best_effort(
         &self,
         kind: RawPayloadKind,
@@ -509,6 +612,99 @@ impl RolloutTraceRecorder {
         }
     }
 
+    fn tool_call_trace_payload(&self, event: &EventMsg) -> Option<RawTraceEventPayload> {
+        match event {
+            EventMsg::ExecCommandBegin(event) if event.source != ExecCommandSource::UserShell => {
+                self.tool_runtime_started_payload(&event.call_id, event)
+            }
+            EventMsg::ExecCommandEnd(event) if event.source != ExecCommandSource::UserShell => self
+                .tool_runtime_ended_payload(
+                    &event.call_id,
+                    execution_status_for_exec_status(&event.status),
+                    event,
+                ),
+            EventMsg::PatchApplyBegin(event) => {
+                self.tool_runtime_started_payload(&event.call_id, event)
+            }
+            EventMsg::PatchApplyEnd(event) => self.tool_runtime_ended_payload(
+                &event.call_id,
+                execution_status_for_patch_status(&event.status),
+                event,
+            ),
+            EventMsg::McpToolCallBegin(event) => {
+                self.tool_runtime_started_payload(&event.call_id, event)
+            }
+            EventMsg::McpToolCallEnd(event) => self.tool_runtime_ended_payload(
+                &event.call_id,
+                if event.result.is_ok() {
+                    ExecutionStatus::Completed
+                } else {
+                    ExecutionStatus::Failed
+                },
+                event,
+            ),
+            EventMsg::CollabAgentSpawnBegin(event) => {
+                self.tool_runtime_started_payload(&event.call_id, event)
+            }
+            EventMsg::CollabAgentSpawnEnd(event) => self.tool_runtime_ended_payload(
+                &event.call_id,
+                if event.new_thread_id.is_some() {
+                    ExecutionStatus::Completed
+                } else {
+                    ExecutionStatus::Failed
+                },
+                event,
+            ),
+            EventMsg::CollabAgentInteractionBegin(event) => {
+                self.tool_runtime_started_payload(&event.call_id, event)
+            }
+            EventMsg::CollabAgentInteractionEnd(event) => {
+                self.tool_runtime_ended_payload(&event.call_id, ExecutionStatus::Completed, event)
+            }
+            EventMsg::CollabWaitingBegin(event) => {
+                self.tool_runtime_started_payload(&event.call_id, event)
+            }
+            EventMsg::CollabWaitingEnd(event) => {
+                self.tool_runtime_ended_payload(&event.call_id, ExecutionStatus::Completed, event)
+            }
+            EventMsg::CollabCloseBegin(event) => {
+                self.tool_runtime_started_payload(&event.call_id, event)
+            }
+            EventMsg::CollabCloseEnd(event) => {
+                self.tool_runtime_ended_payload(&event.call_id, ExecutionStatus::Completed, event)
+            }
+            _ => None,
+        }
+    }
+
+    fn tool_runtime_started_payload(
+        &self,
+        tool_call_id: &str,
+        event: &impl Serialize,
+    ) -> Option<RawTraceEventPayload> {
+        let runtime_payload =
+            self.write_json_payload_best_effort(RawPayloadKind::ToolRuntimeEvent, event)?;
+        Some(RawTraceEventPayload::ToolCallRuntimeStarted {
+            tool_call_id: tool_call_id.to_string(),
+            runtime_payload,
+        })
+    }
+
+    fn tool_runtime_ended_payload(
+        &self,
+        tool_call_id: &str,
+        status: ExecutionStatus,
+        event: &impl Serialize,
+    ) -> Option<RawTraceEventPayload> {
+        let runtime_payload =
+            self.write_json_payload_best_effort(RawPayloadKind::ToolRuntimeEvent, event)?;
+        Some(RawTraceEventPayload::ToolCallRuntimeEnded {
+            tool_call_id: tool_call_id.to_string(),
+            status,
+            runtime_payload,
+        })
+    }
+
     fn code_cell_response_payload(
         &self,
         response: &codex_code_mode::RuntimeResponse,
@@ -520,12 +716,27 @@ impl RolloutTraceRecorder {
     }
 }
 
-#[cfg(test)]
 fn execution_status_for_abort_reason(reason: &TurnAbortReason) -> ExecutionStatus {
     match reason {
         TurnAbortReason::Interrupted | TurnAbortReason::Replaced | TurnAbortReason::ReviewEnded => {
             ExecutionStatus::Cancelled
         }
+    }
+}
+
+fn execution_status_for_exec_status(status: &ExecCommandStatus) -> ExecutionStatus {
+    match status {
+        ExecCommandStatus::Completed => ExecutionStatus::Completed,
+        ExecCommandStatus::Failed => ExecutionStatus::Failed,
+        ExecCommandStatus::Declined => ExecutionStatus::Cancelled,
+    }
+}
+
+fn execution_status_for_patch_status(status: &PatchApplyStatus) -> ExecutionStatus {
+    match status {
+        PatchApplyStatus::Completed => ExecutionStatus::Completed,
+        PatchApplyStatus::Failed => ExecutionStatus::Failed,
+        PatchApplyStatus::Declined => ExecutionStatus::Cancelled,
     }
 }
 
@@ -653,6 +864,21 @@ fn truncate_preview(value: &str) -> String {
         preview.push_str("...");
     }
     preview
+}
+
+fn wrapped_protocol_event_type(event: &EventMsg) -> Option<&'static str> {
+    match event {
+        EventMsg::SessionConfigured(_) => Some("session_configured"),
+        EventMsg::TurnStarted(_) => Some("turn_started"),
+        EventMsg::TurnComplete(_) => Some("turn_complete"),
+        EventMsg::TurnAborted(_) => Some("turn_aborted"),
+        EventMsg::ThreadNameUpdated(_) => Some("thread_name_updated"),
+        EventMsg::ThreadRolledBack(_) => Some("thread_rolled_back"),
+        EventMsg::Error(_) => Some("error"),
+        EventMsg::Warning(_) => Some("warning"),
+        EventMsg::ShutdownComplete => Some("shutdown_complete"),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
