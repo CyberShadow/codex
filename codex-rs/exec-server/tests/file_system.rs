@@ -46,7 +46,7 @@ struct FileSystemContext {
 async fn create_file_system_context(use_remote: bool) -> Result<FileSystemContext> {
     if use_remote {
         let server = exec_server().await?;
-        let environment = Environment::create(Some(server.websocket_url().to_string())).await?;
+        let environment = Environment::create_for_tests(Some(server.websocket_url().to_string()))?;
         Ok(FileSystemContext {
             file_system: environment.get_filesystem(),
             _helper_paths: None,
@@ -214,7 +214,7 @@ async fn sandboxed_file_system_helper_finds_bwrap_on_preserved_path() -> Result<
     let helper_path = std::env::join_paths(path_entries)?;
 
     let server = exec_server_with_env([("PATH", helper_path.as_os_str())]).await?;
-    let environment = Environment::create(Some(server.websocket_url().to_string())).await?;
+    let environment = Environment::create_for_tests(Some(server.websocket_url().to_string()))?;
     let file_system = environment.get_filesystem();
     let workspace = tmp.path().join("workspace");
     std::fs::create_dir_all(&workspace)?;
@@ -569,10 +569,10 @@ async fn file_system_sandboxed_write_allows_additional_write_root(use_remote: bo
     let mut sandbox = read_only_sandbox(readable_dir);
     sandbox.additional_permissions = Some(PermissionProfile {
         network: None,
-        file_system: Some(FileSystemPermissions {
-            read: None,
-            write: Some(vec![absolute_path(writable_dir)]),
-        }),
+        file_system: Some(FileSystemPermissions::from_read_write_roots(
+            /*read*/ None,
+            Some(vec![absolute_path(writable_dir)]),
+        )),
     });
 
     file_system

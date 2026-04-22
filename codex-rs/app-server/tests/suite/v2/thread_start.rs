@@ -64,7 +64,7 @@ async fn thread_start_creates_thread_and_emits_started() -> Result<()> {
     // Start a v2 thread with an explicit model override.
     let req_id = mcp
         .send_thread_start_request(ThreadStartParams {
-            model: Some("gpt-5.1".to_string()),
+            model: Some("gpt-5.2".to_string()),
             ..Default::default()
         })
         .await?;
@@ -414,7 +414,7 @@ async fn thread_start_ephemeral_remains_pathless() -> Result<()> {
 
     let req_id = mcp
         .send_thread_start_request(ThreadStartParams {
-            model: Some("gpt-5.1".to_string()),
+            model: Some("gpt-5.2".to_string()),
             ephemeral: Some(true),
             ..Default::default()
         })
@@ -810,7 +810,13 @@ async fn thread_start_preserves_untrusted_project_trust() -> Result<()> {
     create_config_toml_without_approval_policy(codex_home.path(), &server.uri())?;
 
     let workspace = TempDir::new()?;
-    set_project_trust_level(codex_home.path(), workspace.path(), TrustLevel::Untrusted)?;
+    let config_path = codex_home.path().join("config.toml");
+    let workspace_key = workspace.path().display().to_string();
+    let mut config_toml =
+        std::fs::read_to_string(&config_path)?.parse::<toml_edit::DocumentMut>()?;
+    config_toml["projects"][workspace_key.as_str()]["trust_level"] = toml_edit::value("untrusted");
+    std::fs::write(&config_path, config_toml.to_string())?;
+    let config_before = std::fs::read_to_string(&config_path)?;
 
     let mut mcp = McpProcess::new(codex_home.path()).await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
@@ -828,9 +834,8 @@ async fn thread_start_preserves_untrusted_project_trust() -> Result<()> {
     )
     .await??;
 
-    let config_toml = std::fs::read_to_string(codex_home.path().join("config.toml"))?;
-    assert!(config_toml.contains("trust_level = \"untrusted\""));
-    assert!(!config_toml.contains("trust_level = \"trusted\""));
+    let config_after = std::fs::read_to_string(&config_path)?;
+    assert_eq!(config_after, config_before);
 
     Ok(())
 }
