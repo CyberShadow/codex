@@ -351,6 +351,7 @@ use crate::history_cell::WebSearchCell;
 use crate::key_hint;
 use crate::key_hint::KeyBinding;
 use crate::key_hint::KeyBindingListExt;
+use crate::keymap::ChatKeymap;
 use crate::keymap::RuntimeKeymap;
 use crate::keymap_setup;
 #[cfg(test)]
@@ -809,6 +810,7 @@ pub(crate) struct ChatWidget {
     /// Holds the platform clipboard lease so copied text remains available while supported.
     clipboard_lease: Option<crate::clipboard_copy::ClipboardLease>,
     copy_last_response_binding: Vec<KeyBinding>,
+    chat_keymap: ChatKeymap,
     /// Raw markdown of the most recently completed agent response that
     /// survived any local thread rollback.
     last_agent_markdown: Option<String>,
@@ -5116,6 +5118,10 @@ impl ChatWidget {
             .as_ref()
             .map(|keymap| keymap.app.copy.clone())
             .unwrap_or_else(|| RuntimeKeymap::defaults().app.copy);
+        let chat_keymap = runtime_keymap
+            .as_ref()
+            .map(|keymap| keymap.chat.clone())
+            .unwrap_or_else(|| RuntimeKeymap::defaults().chat);
 
         let mut widget = Self {
             app_event_tx: app_event_tx.clone(),
@@ -5158,6 +5164,7 @@ impl ChatWidget {
             plan_stream_controller: None,
             clipboard_lease: None,
             copy_last_response_binding,
+            chat_keymap,
             running_commands: HashMap::new(),
             collab_agent_metadata: HashMap::new(),
             pending_collab_spawn_requests: HashMap::new(),
@@ -7779,6 +7786,7 @@ impl ChatWidget {
     ) {
         self.config.tui_keymap = keymap_config;
         self.copy_last_response_binding = runtime_keymap.app.copy.clone();
+        self.chat_keymap = runtime_keymap.chat.clone();
         self.bottom_pane.set_keymap_bindings(runtime_keymap);
         self.request_redraw();
     }
