@@ -36,10 +36,10 @@ impl CodeModeExecuteHandler {
         let runtime_cell_id = exec.session.services.code_mode_service.allocate_cell_id();
         let code_cell_trace = exec.session.services.rollout_trace.start_code_cell_trace(
             exec.session.conversation_id.to_string(),
-            exec.turn.sub_id.clone(),
-            runtime_cell_id.clone(),
-            call_id.clone(),
-            args.code.clone(),
+            exec.turn.sub_id.as_str(),
+            runtime_cell_id.as_str(),
+            call_id.as_str(),
+            args.code.as_str(),
         );
         let started_at = std::time::Instant::now();
         let response = exec
@@ -47,7 +47,7 @@ impl CodeModeExecuteHandler {
             .services
             .code_mode_service
             .execute(codex_code_mode::ExecuteRequest {
-                cell_id: Some(runtime_cell_id.clone()),
+                cell_id: Some(runtime_cell_id),
                 tool_call_id: call_id,
                 enabled_tools,
                 source: args.code,

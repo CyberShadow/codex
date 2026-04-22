@@ -106,6 +106,7 @@ impl CodeModeService {
             .cell_id
             .clone()
             .unwrap_or_else(|| self.allocate_cell_id());
+        let initial_yield_time_ms = request.yield_time_ms.unwrap_or(DEFAULT_EXEC_YIELD_TIME_MS);
         let (event_rx, runtime_tx, runtime_terminate_handle, control_rx, response_tx, response_rx) = {
             let mut sessions = self.inner.sessions.lock().await;
             if sessions.contains_key(&cell_id) {
@@ -113,7 +114,7 @@ impl CodeModeService {
             }
 
             let (event_tx, event_rx) = mpsc::unbounded_channel();
-            let (runtime_tx, runtime_terminate_handle) = spawn_runtime(request.clone(), event_tx)?;
+            let (runtime_tx, runtime_terminate_handle) = spawn_runtime(request, event_tx)?;
             let (control_tx, control_rx) = mpsc::unbounded_channel();
             let (response_tx, response_rx) = oneshot::channel();
 
@@ -147,7 +148,7 @@ impl CodeModeService {
             event_rx,
             control_rx,
             response_tx,
-            request.yield_time_ms.unwrap_or(DEFAULT_EXEC_YIELD_TIME_MS),
+            initial_yield_time_ms,
         ));
 
         response_rx
