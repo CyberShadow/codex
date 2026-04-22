@@ -10,6 +10,7 @@
 //! before consolidation is marked as stream-time work so consolidation can force one final rebuild
 //! from the finalized source.
 
+use std::time::Duration;
 use std::time::Instant;
 
 use codex_features::Feature;
@@ -20,9 +21,18 @@ use super::App;
 use super::trailing_run_start;
 use crate::history_cell;
 use crate::history_cell::HistoryCell;
+use crate::transcript_reflow::ResizeReflowDisableReason;
 use crate::transcript_reflow::TRANSCRIPT_REFLOW_DEBOUNCE;
 use crate::transcript_reflow::TranscriptReflowKind;
 use crate::tui;
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ResizeReflowRunStats {
+    kind: TranscriptReflowKind,
+    width: u16,
+    cell_count: usize,
+    rendered_line_count: usize,
+}
 
 impl App {
     pub(super) fn reset_history_emission_state(&mut self) {
@@ -76,9 +86,157 @@ impl App {
         self.config.features.enabled(Feature::TerminalResizeReflow)
     }
 
+    pub(super) fn terminal_resize_reflow_active(&self) -> bool {
+        self.terminal_resize_reflow_enabled() && !self.transcript_reflow.is_runtime_disabled()
+    }
+
     fn schedule_resize_reflow(&mut self, kind: TranscriptReflowKind) -> bool {
-        debug_assert!(self.terminal_resize_reflow_enabled());
+        debug_assert!(self.terminal_resize_reflow_active());
         self.transcript_reflow.schedule_debounced(kind)
+    }
+
+    fn resize_reflow_slow_threshold(&self) -> Option<Duration> {
+        self.config.terminal_resize_reflow.slow_threshold
+    }
+
+    fn resize_reflow_max_rows(&self) -> usize {
+        self.config.terminal_resize_reflow.max_rows
+    }
+
+    pub(super) fn maybe_disable_slow_resize_reflow_flush(
+        &mut self,
+        stats: tui::ResizeReflowDrawStats,
+    ) {
+        let Some(threshold) = self.resize_reflow_slow_threshold() else {
+            return;
+        };
+        if !stats.flushed_reflow_history
+            || !self.transcript_reflow.record_elapsed(
+                ResizeReflowDisableReason::FlushSlow,
+                stats.reflow_flush_elapsed,
+                threshold,
+            )
+        {
+            return;
+        }
+
+        tracing::warn!(
+            elapsed_ms = stats.reflow_flush_elapsed.as_millis(),
+            threshold_ms = threshold.as_millis(),
+            reason = ?self.transcript_reflow.runtime_disabled_reason(),
+            "terminal resize reflow disabled for current transcript after slow terminal flush"
+        );
+        self.maybe_show_slow_resize_reflow_disabled_warning(stats.reflow_flush_elapsed, threshold);
+    }
+
+    fn maybe_disable_slow_resize_reflow_render(
+        &mut self,
+        elapsed: Duration,
+        stats: ResizeReflowRunStats,
+    ) {
+        let Some(threshold) = self.resize_reflow_slow_threshold() else {
+            return;
+        };
+        if !self.transcript_reflow.record_elapsed(
+            ResizeReflowDisableReason::RenderSlow,
+            elapsed,
+            threshold,
+        ) {
+            return;
+        }
+
+        tracing::warn!(
+            elapsed_ms = elapsed.as_millis(),
+            threshold_ms = threshold.as_millis(),
+            kind = ?stats.kind,
+            width = stats.width,
+            cell_count = stats.cell_count,
+            rendered_line_count = stats.rendered_line_count,
+            reason = ?self.transcript_reflow.runtime_disabled_reason(),
+            "terminal resize reflow disabled for current transcript after slow render"
+        );
+        self.maybe_show_slow_resize_reflow_disabled_warning(elapsed, threshold);
+    }
+
+    fn maybe_trim_reflowed_lines_to_row_cap(
+        &mut self,
+        reflowed_lines: &mut Vec<Line<'static>>,
+        stats: ResizeReflowRunStats,
+    ) {
+        let max_rows = self.resize_reflow_max_rows();
+        if reflowed_lines.len() <= max_rows {
+            return;
+        }
+
+        let trimmed_line_count = reflowed_lines.len() - max_rows;
+        *reflowed_lines = reflowed_lines.split_off(trimmed_line_count);
+        tracing::warn!(
+            max_rows,
+            trimmed_line_count,
+            kind = ?stats.kind,
+            width = stats.width,
+            cell_count = stats.cell_count,
+            rendered_line_count = stats.rendered_line_count,
+            replayed_line_count = reflowed_lines.len(),
+            "terminal resize reflow trimmed scrollback after rendered row cap"
+        );
+        self.maybe_show_row_cap_resize_reflow_trimmed_warning(
+            stats.rendered_line_count,
+            reflowed_lines.len(),
+        );
+    }
+
+    fn maybe_show_slow_resize_reflow_disabled_warning(
+        &mut self,
+        elapsed: Duration,
+        threshold: Duration,
+    ) {
+        if self.transcript_reflow.take_runtime_disable_warning_needed() {
+            self.chat_widget.add_info_message(
+                format!(
+                    "Terminal resize reflow paused for this session because resizing took {}ms, above the {}ms limit. Future resizes will use legacy terminal behavior until the transcript is cleared.",
+                    elapsed.as_millis(),
+                    threshold.as_millis()
+                ),
+                /*hint*/ None,
+            );
+        }
+    }
+
+    fn maybe_show_row_cap_resize_reflow_trimmed_warning(
+        &mut self,
+        rendered_line_count: usize,
+        kept_line_count: usize,
+    ) {
+        if self.transcript_reflow.take_row_cap_trim_warning_needed() {
+            self.chat_widget.add_info_message(
+                format!(
+                    "Terminal resize reflow trimmed scrollback to the most recent {kept_line_count} rows because resizing would replay {rendered_line_count} rows, above the {} row limit.",
+                    self.resize_reflow_max_rows(),
+                ),
+                /*hint*/ None,
+            );
+        }
+    }
+
+    fn show_resize_reflow_timing_debug_message(
+        &mut self,
+        elapsed: Duration,
+        stats: ResizeReflowRunStats,
+    ) {
+        let kind = match stats.kind {
+            TranscriptReflowKind::VisibleRows => "visible-row",
+            TranscriptReflowKind::Full => "full",
+        };
+        self.chat_widget.add_info_message(
+            format!(
+                "Terminal resize reflow {kind} pass took {}ms ({} rows from {} cells).",
+                elapsed.as_millis(),
+                stats.rendered_line_count,
+                stats.cell_count
+            ),
+            /*hint*/ None,
+        );
     }
 
     /// Finish stream consolidation by repairing any resize work that happened during streaming.
@@ -91,6 +249,9 @@ impl App {
     pub(super) fn maybe_finish_stream_reflow(&mut self, tui: &mut tui::Tui) -> Result<()> {
         if !self.terminal_resize_reflow_enabled() {
             self.transcript_reflow.clear();
+            return Ok(());
+        }
+        if !self.terminal_resize_reflow_active() {
             return Ok(());
         }
 
@@ -108,6 +269,9 @@ impl App {
             self.transcript_reflow.clear();
             return;
         }
+        if !self.terminal_resize_reflow_active() {
+            return;
+        }
         self.transcript_reflow
             .schedule_immediate(TranscriptReflowKind::Full);
         tui.frame_requester().schedule_frame();
@@ -121,6 +285,9 @@ impl App {
     pub(super) fn finish_required_stream_reflow(&mut self, tui: &mut tui::Tui) -> Result<()> {
         if !self.terminal_resize_reflow_enabled() {
             self.transcript_reflow.clear();
+            return Ok(());
+        }
+        if !self.terminal_resize_reflow_active() {
             return Ok(());
         }
         self.schedule_immediate_resize_reflow(tui);
@@ -151,7 +318,7 @@ impl App {
             self.chat_widget.on_terminal_resize(size.width);
         }
         if should_rebuild_transcript {
-            if self.terminal_resize_reflow_enabled() {
+            if self.terminal_resize_reflow_active() {
                 let reflow_kind = if width.changed {
                     TranscriptReflowKind::Full
                 } else {
@@ -167,14 +334,14 @@ impl App {
                 } else {
                     frame_requester.schedule_frame_in(TRANSCRIPT_REFLOW_DEBOUNCE);
                 }
-            } else if width.changed {
+            } else if !self.terminal_resize_reflow_enabled() && width.changed {
                 self.transcript_reflow.clear();
             }
         }
         if size != last_known_screen_size {
             self.refresh_status_line();
         }
-        if self.terminal_resize_reflow_enabled() {
+        if self.terminal_resize_reflow_active() {
             self.maybe_clear_resize_reflow_without_terminal();
         }
         should_rebuild_transcript
@@ -183,6 +350,9 @@ impl App {
     fn maybe_clear_resize_reflow_without_terminal(&mut self) {
         if !self.terminal_resize_reflow_enabled() {
             self.transcript_reflow.clear();
+            return;
+        }
+        if !self.terminal_resize_reflow_active() {
             return;
         }
         let Some(deadline) = self.transcript_reflow.pending_until() else {
@@ -204,7 +374,7 @@ impl App {
             tui.terminal.last_known_screen_size,
             &tui.frame_requester(),
         );
-        if should_rebuild_transcript && self.terminal_resize_reflow_enabled() {
+        if should_rebuild_transcript && self.terminal_resize_reflow_active() {
             // Resize-sensitive history inserts queued before this frame may be wrapped for the old
             // viewport or targeted at rows no longer visible. Drop them and let resize reflow
             // rebuild from transcript cells.
@@ -225,10 +395,22 @@ impl App {
             self.transcript_reflow.clear();
             return Ok(());
         }
+        if !self.terminal_resize_reflow_active() {
+            return Ok(());
+        }
         let Some(deadline) = self.transcript_reflow.pending_until() else {
             return Ok(());
         };
-        if Instant::now() < deadline || self.overlay.is_some() {
+        let now = Instant::now();
+        if now < deadline {
+            // Later resize events push the reflow deadline out, while the frame scheduler coalesces
+            // delayed draws to the earliest requested instant. If an early draw arrives before the
+            // latest quiet-period deadline, re-arm the draw so the pending reflow cannot get stuck
+            // until the next keypress.
+            tui.frame_requester().schedule_frame_in(deadline - now);
+            return Ok(());
+        }
+        if self.overlay.is_some() {
             return Ok(());
         }
 
@@ -244,69 +426,122 @@ impl App {
         let reflow_ran_during_stream =
             !self.transcript_cells.is_empty() && self.should_mark_reflow_as_stream_time();
 
-        match reflow_kind {
-            TranscriptReflowKind::Full => self.reflow_transcript_now(tui)?,
-            TranscriptReflowKind::VisibleRows => self.repaint_visible_transcript_rows(tui)?,
-        }
+        let started = Instant::now();
+        let stats = match reflow_kind {
+            TranscriptReflowKind::Full => self.reflow_transcript_now(tui, reflow_kind)?,
+            TranscriptReflowKind::VisibleRows => {
+                self.repaint_visible_transcript_rows(tui, reflow_kind)?
+            }
+        };
+        let elapsed = started.elapsed();
+        self.show_resize_reflow_timing_debug_message(elapsed, stats);
+        self.maybe_disable_slow_resize_reflow_render(elapsed, stats);
+        self.transcript_reflow.mark_reflowed_width(stats.width);
 
-        if reflow_ran_during_stream {
+        if reflow_ran_during_stream && !self.transcript_reflow.is_runtime_disabled() {
             self.transcript_reflow.mark_ran_during_stream();
+        }
+        if !self.transcript_reflow.is_runtime_disabled() {
+            // Some terminals settle their final reported width after the repaint that handled the
+            // last resize event. Request one cheap follow-up draw so `handle_draw_pre_render` can
+            // sample that width and schedule a final reflow if needed.
+            tui.frame_requester()
+                .schedule_frame_in(TRANSCRIPT_REFLOW_DEBOUNCE);
         }
 
         Ok(())
     }
 
-    fn reflow_transcript_now(&mut self, tui: &mut tui::Tui) -> Result<()> {
-        // Drop any queued pre-resize/pre-consolidation inserts before rebuilding from cells.
-        tui.clear_pending_history_lines();
+    fn reflow_transcript_now(
+        &mut self,
+        tui: &mut tui::Tui,
+        kind: TranscriptReflowKind,
+    ) -> Result<ResizeReflowRunStats> {
+        let width = tui.terminal.size()?.width;
+        let cell_count = self.transcript_cells.len();
         if self.transcript_cells.is_empty() {
+            // Drop any queued pre-resize/pre-consolidation inserts before rebuilding from cells.
+            tui.clear_pending_history_lines();
             self.reset_history_emission_state();
-            return Ok(());
+            return Ok(ResizeReflowRunStats {
+                kind,
+                width,
+                cell_count,
+                rendered_line_count: 0,
+            });
         }
 
+        let mut reflowed_lines = self.render_transcript_lines_for_reflow(width);
+        let stats = ResizeReflowRunStats {
+            kind,
+            width,
+            cell_count,
+            rendered_line_count: reflowed_lines.len(),
+        };
+        self.maybe_trim_reflowed_lines_to_row_cap(&mut reflowed_lines, stats);
+
+        // Drop any queued pre-resize/pre-consolidation inserts before rebuilding from cells.
+        tui.clear_pending_history_lines();
         if tui.is_alt_screen_active() {
             tui.terminal.clear_visible_screen()?;
         } else {
             tui.terminal.clear_scrollback_and_visible_screen_ansi()?;
         }
 
-        self.reset_history_emission_state();
+        self.deferred_history_lines.clear();
+        if !reflowed_lines.is_empty() {
+            tui.insert_reflowed_history_lines(reflowed_lines);
+        }
 
+        Ok(stats)
+    }
+
+    fn repaint_visible_transcript_rows(
+        &mut self,
+        tui: &mut tui::Tui,
+        kind: TranscriptReflowKind,
+    ) -> Result<ResizeReflowRunStats> {
         let width = tui.terminal.size()?.width;
+        let cell_count = self.transcript_cells.len();
+        if self.transcript_cells.is_empty() {
+            tui.clear_pending_history_lines();
+            self.reset_history_emission_state();
+            return Ok(ResizeReflowRunStats {
+                kind,
+                width,
+                cell_count,
+                rendered_line_count: 0,
+            });
+        }
+
+        let mut reflowed_lines = self.render_transcript_lines_for_reflow(width);
+        let stats = ResizeReflowRunStats {
+            kind,
+            width,
+            cell_count,
+            rendered_line_count: reflowed_lines.len(),
+        };
+        self.maybe_trim_reflowed_lines_to_row_cap(&mut reflowed_lines, stats);
+
+        tui.clear_pending_history_lines();
+        tui.terminal.clear_visible_screen()?;
+        self.deferred_history_lines.clear();
+        if !reflowed_lines.is_empty() {
+            tui.insert_reflowed_history_lines(reflowed_lines);
+        }
+
+        Ok(stats)
+    }
+
+    fn render_transcript_lines_for_reflow(&mut self, width: u16) -> Vec<Line<'static>> {
+        self.has_emitted_history_lines = false;
         let mut reflowed_lines = Vec::new();
         // Iterate by index to avoid cloning the Vec and bumping Arc refcounts.
         for i in 0..self.transcript_cells.len() {
             let cell = self.transcript_cells[i].clone();
             self.append_history_cell_lines_for_insert(&mut reflowed_lines, cell.as_ref(), width);
         }
-        if !reflowed_lines.is_empty() {
-            tui.insert_reflowed_history_lines(reflowed_lines);
-        }
-
-        Ok(())
-    }
-
-    fn repaint_visible_transcript_rows(&mut self, tui: &mut tui::Tui) -> Result<()> {
-        tui.clear_pending_history_lines();
-        if self.transcript_cells.is_empty() {
-            self.reset_history_emission_state();
-            return Ok(());
-        }
-
-        tui.terminal.clear_visible_screen()?;
-        self.reset_history_emission_state();
-
-        let width = tui.terminal.size()?.width;
-        let mut reflowed_lines = Vec::new();
-        for i in 0..self.transcript_cells.len() {
-            let cell = self.transcript_cells[i].clone();
-            self.append_history_cell_lines_for_insert(&mut reflowed_lines, cell.as_ref(), width);
-        }
-        if !reflowed_lines.is_empty() {
-            tui.insert_reflowed_history_lines(reflowed_lines);
-        }
-
-        Ok(())
+        reflowed_lines
     }
 
     /// Return whether current transcript state should be treated as stream-time resize state.
