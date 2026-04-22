@@ -48,28 +48,28 @@ pub struct WaitRequest {
 }
 
 #[derive(Debug, PartialEq)]
-pub enum WaitResponse {
+pub enum WaitOutcome {
     /// The requested cell was live when the wait command was accepted.
     ///
     /// Non-yielding responses from this variant are terminal lifecycle points
     /// for the matching code cell.
-    Cell(RuntimeResponse),
+    LiveCell(RuntimeResponse),
     /// The requested cell was not live, so the response is only the result of
     /// the `wait` tool call. It must not be treated as a code-cell lifecycle
     /// event because there is no cell to complete.
     MissingCell(RuntimeResponse),
 }
 
-impl WaitResponse {
+impl WaitOutcome {
     pub fn into_runtime_response(self) -> RuntimeResponse {
         match self {
-            WaitResponse::Cell(response) | WaitResponse::MissingCell(response) => response,
+            WaitOutcome::LiveCell(response) | WaitOutcome::MissingCell(response) => response,
         }
     }
 
     pub fn runtime_response(&self) -> &RuntimeResponse {
         match self {
-            WaitResponse::Cell(response) | WaitResponse::MissingCell(response) => response,
+            WaitOutcome::LiveCell(response) | WaitOutcome::MissingCell(response) => response,
         }
     }
 }

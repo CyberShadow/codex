@@ -73,7 +73,7 @@ impl ToolHandler for CodeModeWaitHandler {
                     .await
                     .map_err(FunctionCallError::RespondToModel)?;
                 let response = wait_response.runtime_response();
-                if matches!(&wait_response, codex_code_mode::WaitResponse::Cell(_))
+                if matches!(&wait_response, codex_code_mode::WaitOutcome::LiveCell(_))
                     && !matches!(response, codex_code_mode::RuntimeResponse::Yielded { .. })
                 {
                     // Only a live-cell wait can close a CodeCell. A missing

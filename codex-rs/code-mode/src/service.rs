@@ -20,8 +20,8 @@ use crate::runtime::RuntimeCommand;
 use crate::runtime::RuntimeEvent;
 use crate::runtime::RuntimeResponse;
 use crate::runtime::TurnMessage;
+use crate::runtime::WaitOutcome;
 use crate::runtime::WaitRequest;
-use crate::runtime::WaitResponse;
 use crate::runtime::spawn_runtime;
 
 /// Nested tool request emitted by one code-mode cell.
@@ -155,7 +155,7 @@ impl CodeModeService {
             .map_err(|_| "exec runtime ended unexpectedly".to_string())
     }
 
-    pub async fn wait(&self, request: WaitRequest) -> Result<WaitResponse, String> {
+    pub async fn wait(&self, request: WaitRequest) -> Result<WaitOutcome, String> {
         let cell_id = request.cell_id.clone();
         let handle = self
             .inner
@@ -165,7 +165,7 @@ impl CodeModeService {
             .get(&request.cell_id)
             .cloned();
         let Some(handle) = handle else {
-            return Ok(WaitResponse::MissingCell(missing_cell_response(cell_id)));
+            return Ok(WaitOutcome::MissingCell(missing_cell_response(cell_id)));
         };
         let (response_tx, response_rx) = oneshot::channel();
         let control_message = if request.terminate {
@@ -177,11 +177,11 @@ impl CodeModeService {
             }
         };
         if handle.control_tx.send(control_message).is_err() {
-            return Ok(WaitResponse::MissingCell(missing_cell_response(cell_id)));
+            return Ok(WaitOutcome::MissingCell(missing_cell_response(cell_id)));
         }
         match response_rx.await {
-            Ok(response) => Ok(WaitResponse::Cell(response)),
-            Err(_) => Ok(WaitResponse::MissingCell(missing_cell_response(
+            Ok(response) => Ok(WaitOutcome::LiveCell(response)),
+            Err(_) => Ok(WaitOutcome::MissingCell(missing_cell_response(
                 request.cell_id,
             ))),
         }
@@ -528,8 +528,8 @@ mod tests {
     use super::RuntimeResponse;
     use super::SessionControlCommand;
     use super::SessionControlContext;
+    use super::WaitOutcome;
     use super::WaitRequest;
-    use super::WaitResponse;
     use super::run_session_control;
     use crate::FunctionCallOutputContentItem;
     use crate::runtime::ExecuteRequest;
@@ -896,7 +896,7 @@ image({
 
         assert_eq!(
             response,
-            WaitResponse::MissingCell(RuntimeResponse::Result {
+            WaitOutcome::MissingCell(RuntimeResponse::Result {
                 cell_id: "missing".to_string(),
                 content_items: Vec::new(),
                 stored_values: HashMap::new(),

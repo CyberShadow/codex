@@ -88,7 +88,7 @@ impl CodeModeService {
     pub(crate) async fn wait(
         &self,
         request: codex_code_mode::WaitRequest,
-    ) -> Result<codex_code_mode::WaitResponse, String> {
+    ) -> Result<codex_code_mode::WaitOutcome, String> {
         self.inner.wait(request).await
     }
 
