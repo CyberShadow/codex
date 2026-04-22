@@ -37,6 +37,11 @@ model?: string | null, modelProvider?: string | null, serviceTier?: ServiceTier 
  * and subsequent turns.
  */
 approvalsReviewer?: ApprovalsReviewer | null, sandbox?: SandboxMode | null, config?: { [key in string]?: JsonValue } | null, baseInstructions?: string | null, developerInstructions?: string | null, personality?: Personality | null, /**
+ * When false, return only thread metadata and live-resume state without
+ * populating `thread.turns`. This is useful when the client plans to call
+ * `thread/turns/list` immediately after resuming.
+ */
+includeTurns?: boolean | null, /**
  * If true, persist additional rollout EventMsg variants required to
  * reconstruct a richer thread history on subsequent resume/fork/read.
  */
