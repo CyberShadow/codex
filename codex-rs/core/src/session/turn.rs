@@ -1512,6 +1512,7 @@ pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<String> {
         },
         EventMsg::Error(_)
         | EventMsg::Warning(_)
+        | EventMsg::GuardianWarning(_)
         | EventMsg::RealtimeConversationStarted(_)
         | EventMsg::RealtimeConversationSdp(_)
         | EventMsg::RealtimeConversationRealtime(_)
