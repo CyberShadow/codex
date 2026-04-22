@@ -20,7 +20,7 @@ use crate::InferenceTraceContext;
 use crate::RawPayloadKind;
 use crate::RawPayloadRef;
 use crate::RawTraceEventPayload;
-use crate::ToolDispatchStart;
+use crate::ToolDispatchInvocation;
 use crate::ToolDispatchTraceContext;
 use crate::TraceWriter;
 
@@ -221,16 +221,16 @@ impl RolloutTraceRecorder {
     /// Starts one dispatch-level tool lifecycle and returns its trace handle.
     pub fn start_tool_dispatch_trace(
         &self,
-        start: Option<ToolDispatchStart>,
+        invocation: Option<ToolDispatchInvocation>,
     ) -> ToolDispatchTraceContext {
-        let Some(start) = start else {
+        let Some(invocation) = invocation else {
             return ToolDispatchTraceContext::disabled();
         };
         let RolloutTraceRecorderState::Enabled(recorder) = &self.state else {
             return ToolDispatchTraceContext::disabled();
         };
 
-        ToolDispatchTraceContext::start(Arc::clone(&recorder.writer), start)
+        ToolDispatchTraceContext::start(Arc::clone(&recorder.writer), invocation)
     }
 
     /// Builds reusable inference trace context for one Codex turn.

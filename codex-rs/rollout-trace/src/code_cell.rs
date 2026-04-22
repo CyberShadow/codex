@@ -52,14 +52,14 @@ struct CodeCellResponseTracePayload<'a> {
 
 impl CodeCellTraceContext {
     /// Builds a context that accepts trace calls and records nothing.
-    pub fn disabled() -> Self {
+    pub(crate) fn disabled() -> Self {
         Self {
             state: CodeCellTraceContextState::Disabled,
         }
     }
 
     /// Builds a context for an already-known code-mode runtime cell.
-    pub fn enabled(
+    pub(crate) fn enabled(
         writer: Arc<TraceWriter>,
         thread_id: impl Into<AgentThreadId>,
         codex_turn_id: impl Into<CodexTurnId>,

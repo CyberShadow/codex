@@ -3,7 +3,6 @@ use crate::session::session::Session;
 use crate::session::tests::make_session_and_context;
 use crate::session::turn_context::TurnContext;
 use crate::tools::code_mode::CodeModeWaitHandler;
-use crate::tools::code_mode::PUBLIC_TOOL_NAME;
 use crate::tools::code_mode::WAIT_TOOL_NAME;
 use crate::turn_diff_tracker::TurnDiffTracker;
 use codex_protocol::protocol::SessionSource;
@@ -37,8 +36,8 @@ impl ToolHandler for TestHandler {
 
 #[test]
 fn handler_looks_up_namespaced_aliases_explicitly() {
-    let plain_handler = Arc::new(TestHandler::default()) as Arc<dyn AnyToolHandler>;
-    let namespaced_handler = Arc::new(TestHandler::default()) as Arc<dyn AnyToolHandler>;
+    let plain_handler = Arc::new(TestHandler) as Arc<dyn AnyToolHandler>;
+    let namespaced_handler = Arc::new(TestHandler) as Arc<dyn AnyToolHandler>;
     let namespace = "mcp__codex_apps__gmail";
     let tool_name = "gmail_get_recent_emails";
     let plain_name = codex_tools::ToolName::plain(tool_name);
@@ -85,7 +84,7 @@ async fn dispatch_lifecycle_trace_records_direct_and_code_mode_requesters() -> a
 
     let registry = ToolRegistry::new(HashMap::from([(
         codex_tools::ToolName::plain("test_tool"),
-        Arc::new(TestHandler::default()) as Arc<dyn AnyToolHandler>,
+        Arc::new(TestHandler) as Arc<dyn AnyToolHandler>,
     )]));
     let session = Arc::new(session);
     let turn = Arc::new(turn);
@@ -162,44 +161,10 @@ async fn dispatch_lifecycle_trace_records_direct_and_code_mode_requesters() -> a
 #[tokio::test]
 async fn dispatch_lifecycle_trace_skips_noncanonical_boundaries() -> anyhow::Result<()> {
     assert_dispatch_trace_skips(
-        Arc::new(TestHandler::default()) as Arc<dyn AnyToolHandler>,
+        Arc::new(TestHandler) as Arc<dyn AnyToolHandler>,
         ToolCallSource::JsRepl,
     )
     .await
-}
-
-#[tokio::test]
-async fn exec_dispatch_trace_is_suppressed_by_code_cell_boundary() -> anyhow::Result<()> {
-    let (session, turn) = make_session_and_context().await;
-    let session = Arc::new(session);
-    let turn = Arc::new(turn);
-
-    assert!(suppresses_tool_dispatch_trace(
-        &test_invocation_with_payload(
-            Arc::clone(&session),
-            Arc::clone(&turn),
-            "exec-call",
-            codex_tools::ToolName::plain(PUBLIC_TOOL_NAME),
-            ToolCallSource::Direct,
-            ToolPayload::Custom {
-                input: "1 + 1".to_string(),
-            },
-        )
-    ));
-    assert!(!suppresses_tool_dispatch_trace(
-        &test_invocation_with_payload(
-            session,
-            turn,
-            "custom-call",
-            codex_tools::ToolName::plain("custom_tool"),
-            ToolCallSource::Direct,
-            ToolPayload::Custom {
-                input: "payload".to_string(),
-            },
-        )
-    ));
-
-    Ok(())
 }
 
 async fn assert_dispatch_trace_skips(

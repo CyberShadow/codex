@@ -58,12 +58,14 @@ pub use recorder::RolloutTraceRecorder;
 pub use recorder::ThreadStartedTraceMetadata;
 /// Replay a raw trace bundle and write/read its reduced `RolloutTrace`.
 pub use reducer::replay_bundle;
+/// Request data for the canonical Codex tool boundary.
+pub use tool_dispatch::ToolDispatchInvocation;
+/// Tool input observed at the registry boundary.
+pub use tool_dispatch::ToolDispatchPayload;
 /// Runtime source that caused a dispatch-level tool call.
 pub use tool_dispatch::ToolDispatchRequester;
 /// Result data returned from a dispatch-level tool call.
 pub use tool_dispatch::ToolDispatchResult;
-/// Request data for the canonical Codex tool boundary.
-pub use tool_dispatch::ToolDispatchStart;
 /// No-op-capable handle for recording one resolved tool dispatch.
 pub use tool_dispatch::ToolDispatchTraceContext;
 /// Append-only writer used by hot-path Codex instrumentation.

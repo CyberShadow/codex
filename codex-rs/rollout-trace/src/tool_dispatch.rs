@@ -7,9 +7,13 @@
 use std::fmt::Display;
 use std::sync::Arc;
 
+use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ResponseInputItem;
+use codex_protocol::models::SandboxPermissions;
+use codex_protocol::models::SearchToolCallParams;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
+use serde_json::json;
 use tracing::warn;
 
 use crate::model::AgentThreadId;
@@ -47,18 +51,15 @@ struct EnabledToolDispatchTraceContext {
     tool_call_id: ToolCallId,
 }
 
-/// Request data for the canonical Codex tool boundary.
-pub struct ToolDispatchStart {
+/// Core-facing request data for the canonical Codex tool boundary.
+pub struct ToolDispatchInvocation {
     pub thread_id: AgentThreadId,
     pub codex_turn_id: CodexTurnId,
     pub tool_call_id: ToolCallId,
     pub tool_name: String,
     pub tool_namespace: Option<String>,
     pub requester: ToolDispatchRequester,
-    pub kind: ToolCallKind,
-    pub label: String,
-    pub input_preview: Option<String>,
-    pub payload: JsonValue,
+    pub payload: ToolDispatchPayload,
 }
 
 /// Runtime source that caused a dispatch-level tool call.
@@ -69,6 +70,33 @@ pub enum ToolDispatchRequester {
     CodeCell {
         runtime_cell_id: String,
         runtime_tool_call_id: CodeModeRuntimeToolId,
+    },
+}
+
+/// Tool input observed at the registry boundary.
+pub enum ToolDispatchPayload {
+    Function {
+        arguments: String,
+    },
+    ToolSearch {
+        arguments: SearchToolCallParams,
+    },
+    Custom {
+        input: String,
+    },
+    LocalShell {
+        command: Vec<String>,
+        workdir: Option<String>,
+        timeout_ms: Option<u64>,
+        sandbox_permissions: Option<SandboxPermissions>,
+        prefix_rule: Option<Vec<String>>,
+        additional_permissions: Option<PermissionProfile>,
+        justification: Option<String>,
+    },
+    Mcp {
+        server: String,
+        tool: String,
+        raw_arguments: String,
     },
 }
 
@@ -105,21 +133,25 @@ enum DispatchedToolTraceResponse<'a> {
 
 impl ToolDispatchTraceContext {
     /// Builds a context that accepts trace calls and records nothing.
-    pub fn disabled() -> Self {
+    pub(crate) fn disabled() -> Self {
         Self {
             state: ToolDispatchTraceContextState::Disabled,
         }
     }
 
     /// Starts one dispatch-level lifecycle and returns the handle for its result.
-    pub fn start(writer: Arc<TraceWriter>, start: ToolDispatchStart) -> Self {
+    pub(crate) fn start(writer: Arc<TraceWriter>, invocation: ToolDispatchInvocation) -> Self {
+        if suppresses_tool_dispatch_trace(&invocation) {
+            return Self::disabled();
+        }
+
         let context = EnabledToolDispatchTraceContext {
             writer,
-            thread_id: start.thread_id.clone(),
-            codex_turn_id: start.codex_turn_id.clone(),
-            tool_call_id: start.tool_call_id.clone(),
+            thread_id: invocation.thread_id.clone(),
+            codex_turn_id: invocation.codex_turn_id.clone(),
+            tool_call_id: invocation.tool_call_id.clone(),
         };
-        record_started(&context, start);
+        record_started(&context, invocation);
         Self {
             state: ToolDispatchTraceContextState::Enabled(context),
         }
@@ -156,16 +188,28 @@ impl ToolDispatchTraceContext {
     }
 }
 
-fn record_started(context: &EnabledToolDispatchTraceContext, start: ToolDispatchStart) {
+fn suppresses_tool_dispatch_trace(invocation: &ToolDispatchInvocation) -> bool {
+    matches!(invocation.payload, ToolDispatchPayload::Custom { .. })
+        && invocation.tool_namespace.is_none()
+        && invocation.tool_name == codex_code_mode::PUBLIC_TOOL_NAME
+}
+
+fn record_started(context: &EnabledToolDispatchTraceContext, invocation: ToolDispatchInvocation) {
+    let tool_name = invocation.tool_name;
+    let tool_namespace = invocation.tool_namespace;
+    let kind = dispatched_tool_kind(&tool_name, &invocation.payload);
+    let label = dispatched_tool_label(&tool_name, tool_namespace.as_deref(), &invocation.payload);
+    let input_preview = Some(truncate_preview(&invocation.payload.log_payload()));
+    let payload = invocation.payload.into_json_payload();
     let request = DispatchedToolTraceRequest {
-        tool_name: start.tool_name.as_str(),
-        tool_namespace: start.tool_namespace.as_deref(),
-        payload: &start.payload,
+        tool_name: tool_name.as_str(),
+        tool_namespace: tool_namespace.as_deref(),
+        payload: &payload,
     };
     let request_payload =
         write_json_payload_best_effort(&context.writer, RawPayloadKind::ToolInvocation, &request);
     let (model_visible_call_id, code_mode_runtime_tool_id, requester) =
-        requester_fields(start.requester);
+        requester_fields(invocation.requester);
 
     append_with_context_best_effort(
         context,
@@ -174,10 +218,10 @@ fn record_started(context: &EnabledToolDispatchTraceContext, start: ToolDispatch
             model_visible_call_id,
             code_mode_runtime_tool_id,
             requester,
-            kind: start.kind,
+            kind,
             summary: ToolCallSummary::Generic {
-                label: start.label,
-                input_preview: start.input_preview,
+                label,
+                input_preview,
                 output_preview: None,
             },
             invocation_payload: request_payload,
@@ -209,6 +253,112 @@ fn requester_fields(
             RawToolCallRequester::CodeCell { runtime_cell_id },
         ),
     }
+}
+
+fn dispatched_tool_kind(tool_name: &str, payload: &ToolDispatchPayload) -> ToolCallKind {
+    if let ToolDispatchPayload::Mcp { server, tool, .. } = payload {
+        return ToolCallKind::Mcp {
+            server: server.clone(),
+            tool: tool.clone(),
+        };
+    }
+
+    match tool_name {
+        "exec_command" | "local_shell" | "shell" | "shell_command" => ToolCallKind::ExecCommand,
+        "write_stdin" => ToolCallKind::WriteStdin,
+        "apply_patch" => ToolCallKind::ApplyPatch,
+        "web_search" | "web_search_preview" => ToolCallKind::Web,
+        "image_generation" | "image_query" => ToolCallKind::ImageGeneration,
+        "spawn_agent" => ToolCallKind::SpawnAgent,
+        "send_message" => ToolCallKind::SendMessage,
+        "followup_task" => ToolCallKind::AssignAgentTask,
+        "wait_agent" => ToolCallKind::WaitAgent,
+        "close_agent" => ToolCallKind::CloseAgent,
+        other => ToolCallKind::Other {
+            name: other.to_string(),
+        },
+    }
+}
+
+fn dispatched_tool_label(
+    tool_name: &str,
+    tool_namespace: Option<&str>,
+    payload: &ToolDispatchPayload,
+) -> String {
+    if let ToolDispatchPayload::Mcp { server, tool, .. } = payload {
+        return format!("mcp:{server}:{tool}");
+    }
+
+    match tool_namespace {
+        Some(namespace) => format!("{namespace}.{tool_name}"),
+        None => tool_name.to_string(),
+    }
+}
+
+impl ToolDispatchPayload {
+    fn log_payload(&self) -> String {
+        match self {
+            ToolDispatchPayload::Function { arguments } => arguments.clone(),
+            ToolDispatchPayload::ToolSearch { arguments } => arguments.query.clone(),
+            ToolDispatchPayload::Custom { input } => input.clone(),
+            ToolDispatchPayload::LocalShell { command, .. } => command.join(" "),
+            ToolDispatchPayload::Mcp { raw_arguments, .. } => raw_arguments.clone(),
+        }
+    }
+
+    fn into_json_payload(self) -> JsonValue {
+        match self {
+            ToolDispatchPayload::Function { arguments } => json!({
+                "type": "function",
+                "arguments": arguments,
+            }),
+            ToolDispatchPayload::ToolSearch { arguments } => json!({
+                "type": "tool_search",
+                "arguments": arguments,
+            }),
+            ToolDispatchPayload::Custom { input } => json!({
+                "type": "custom",
+                "input": input,
+            }),
+            ToolDispatchPayload::LocalShell {
+                command,
+                workdir,
+                timeout_ms,
+                sandbox_permissions,
+                prefix_rule,
+                additional_permissions,
+                justification,
+            } => json!({
+                "type": "local_shell",
+                "command": command,
+                "workdir": workdir,
+                "timeout_ms": timeout_ms,
+                "sandbox_permissions": sandbox_permissions,
+                "prefix_rule": prefix_rule,
+                "additional_permissions": additional_permissions,
+                "justification": justification,
+            }),
+            ToolDispatchPayload::Mcp {
+                server,
+                tool,
+                raw_arguments,
+            } => json!({
+                "type": "mcp",
+                "server": server,
+                "tool": tool,
+                "raw_arguments": raw_arguments,
+            }),
+        }
+    }
+}
+
+fn truncate_preview(value: &str) -> String {
+    const MAX_PREVIEW_CHARS: usize = 160;
+    let mut preview = value.chars().take(MAX_PREVIEW_CHARS).collect::<String>();
+    if value.chars().count() > MAX_PREVIEW_CHARS {
+        preview.push_str("...");
+    }
+    preview
 }
 
 fn append_tool_call_ended(
@@ -252,5 +402,61 @@ fn append_with_context_best_effort(
     };
     if let Err(err) = context.writer.append_with_context(event_context, payload) {
         warn!("failed to append rollout trace event: {err:#}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn suppresses_only_noncanonical_dispatch_boundaries() {
+        assert!(suppresses_tool_dispatch_trace(&invocation(
+            codex_code_mode::PUBLIC_TOOL_NAME,
+            None,
+            ToolDispatchRequester::Model {
+                model_visible_call_id: "call-exec".to_string(),
+            },
+            ToolDispatchPayload::Custom {
+                input: "1 + 1".to_string(),
+            },
+        )));
+        assert!(!suppresses_tool_dispatch_trace(&invocation(
+            "custom_tool",
+            None,
+            ToolDispatchRequester::Model {
+                model_visible_call_id: "call-custom".to_string(),
+            },
+            ToolDispatchPayload::Custom {
+                input: "payload".to_string(),
+            },
+        )));
+        assert!(!suppresses_tool_dispatch_trace(&invocation(
+            codex_code_mode::PUBLIC_TOOL_NAME,
+            Some("mcp__server".to_string()),
+            ToolDispatchRequester::Model {
+                model_visible_call_id: "call-namespaced".to_string(),
+            },
+            ToolDispatchPayload::Custom {
+                input: "payload".to_string(),
+            },
+        )));
+    }
+
+    fn invocation(
+        tool_name: &str,
+        tool_namespace: Option<String>,
+        requester: ToolDispatchRequester,
+        payload: ToolDispatchPayload,
+    ) -> ToolDispatchInvocation {
+        ToolDispatchInvocation {
+            thread_id: "thread-1".to_string(),
+            codex_turn_id: "turn-1".to_string(),
+            tool_call_id: "tool-call-1".to_string(),
+            tool_name: tool_name.to_string(),
+            tool_namespace,
+            requester,
+            payload,
+        }
     }
 }
