@@ -3,6 +3,7 @@ use crate::session::session::Session;
 use crate::session::tests::make_session_and_context;
 use crate::session::turn_context::TurnContext;
 use crate::tools::code_mode::CodeModeWaitHandler;
+use crate::tools::code_mode::PUBLIC_TOOL_NAME;
 use crate::tools::code_mode::WAIT_TOOL_NAME;
 use crate::turn_diff_tracker::TurnDiffTracker;
 use codex_protocol::protocol::SessionSource;
@@ -17,19 +18,13 @@ use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Default)]
-struct TestHandler {
-    first_class_trace_object: bool,
-}
+struct TestHandler;
 
 impl ToolHandler for TestHandler {
     type Output = crate::tools::context::FunctionToolOutput;
 
     fn kind(&self) -> ToolKind {
         ToolKind::Function
-    }
-
-    fn uses_first_class_trace_object(&self, _invocation: &ToolInvocation) -> bool {
-        self.first_class_trace_object
     }
 
     async fn handle(&self, _invocation: ToolInvocation) -> Result<Self::Output, FunctionCallError> {
@@ -170,14 +165,41 @@ async fn dispatch_lifecycle_trace_skips_noncanonical_boundaries() -> anyhow::Res
         Arc::new(TestHandler::default()) as Arc<dyn AnyToolHandler>,
         ToolCallSource::JsRepl,
     )
-    .await?;
-    assert_dispatch_trace_skips(
-        Arc::new(TestHandler {
-            first_class_trace_object: true,
-        }) as Arc<dyn AnyToolHandler>,
-        ToolCallSource::Direct,
-    )
     .await
+}
+
+#[tokio::test]
+async fn exec_dispatch_trace_is_suppressed_by_code_cell_boundary() -> anyhow::Result<()> {
+    let (session, turn) = make_session_and_context().await;
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+
+    assert!(suppresses_tool_dispatch_trace(
+        &test_invocation_with_payload(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            "exec-call",
+            codex_tools::ToolName::plain(PUBLIC_TOOL_NAME),
+            ToolCallSource::Direct,
+            ToolPayload::Custom {
+                input: "1 + 1".to_string(),
+            },
+        )
+    ));
+    assert!(!suppresses_tool_dispatch_trace(
+        &test_invocation_with_payload(
+            session,
+            turn,
+            "custom-call",
+            codex_tools::ToolName::plain("custom_tool"),
+            ToolCallSource::Direct,
+            ToolPayload::Custom {
+                input: "payload".to_string(),
+            },
+        )
+    ));
+
+    Ok(())
 }
 
 async fn assert_dispatch_trace_skips(
@@ -255,17 +277,35 @@ fn test_invocation(
     source: ToolCallSource,
     arguments: &str,
 ) -> ToolInvocation {
+    test_invocation_with_payload(
+        session,
+        turn,
+        call_id,
+        codex_tools::ToolName::plain(tool_name),
+        source,
+        ToolPayload::Function {
+            arguments: arguments.to_string(),
+        },
+    )
+}
+
+fn test_invocation_with_payload(
+    session: Arc<Session>,
+    turn: Arc<TurnContext>,
+    call_id: &str,
+    tool_name: codex_tools::ToolName,
+    source: ToolCallSource,
+    payload: ToolPayload,
+) -> ToolInvocation {
     ToolInvocation {
         session,
         turn,
         cancellation_token: CancellationToken::new(),
         tracker: Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new())),
         call_id: call_id.to_string(),
-        tool_name: codex_tools::ToolName::plain(tool_name),
+        tool_name,
         source,
-        payload: ToolPayload::Function {
-            arguments: arguments.to_string(),
-        },
+        payload,
     }
 }
 

@@ -10,6 +10,7 @@ use crate::hook_runtime::run_pre_tool_use_hooks;
 use crate::memories::usage::emit_metric_for_tool_read;
 use crate::sandbox_tags::sandbox_tag;
 use crate::session::turn_context::TurnContext;
+use crate::tools::code_mode::is_exec_tool_name;
 use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolCallSource;
 use crate::tools::context::ToolInvocation;
@@ -87,16 +88,6 @@ pub trait ToolHandler: Send + Sync {
     /// Creates an optional consumer for streamed tool argument diffs.
     fn create_diff_consumer(&self) -> Option<Box<dyn ToolArgumentDiffConsumer>> {
         None
-    }
-
-    /// Returns `true` when this handler is represented by a trace object other
-    /// than `ToolCall`.
-    ///
-    /// Protocol events are runtime observations on the `ToolCall`; they do not
-    /// suppress the canonical tool boundary. The public code-mode `exec` tool is
-    /// the exception because `CodeCell` owns that model-visible boundary.
-    fn uses_first_class_trace_object(&self, _invocation: &ToolInvocation) -> bool {
-        false
     }
 
     /// Perform the actual [ToolInvocation] and returns a [ToolOutput] containing
@@ -185,8 +176,6 @@ trait AnyToolHandler: Send + Sync {
 
     fn create_diff_consumer(&self) -> Option<Box<dyn ToolArgumentDiffConsumer>>;
 
-    fn uses_first_class_trace_object(&self, invocation: &ToolInvocation) -> bool;
-
     fn handle_any<'a>(
         &'a self,
         invocation: ToolInvocation,
@@ -222,10 +211,6 @@ where
         ToolHandler::create_diff_consumer(self)
     }
 
-    fn uses_first_class_trace_object(&self, invocation: &ToolInvocation) -> bool {
-        ToolHandler::uses_first_class_trace_object(self, invocation)
-    }
-
     fn handle_any<'a>(
         &'a self,
         invocation: ToolInvocation,
@@ -253,14 +238,14 @@ pub struct ToolRegistry {
 /// pre-use hooks, handler execution, after-use hooks, and result status all
 /// affect the trace lifecycle. Keeping the trace eligibility and event writes
 /// behind this helper makes those paths say what happened instead of repeating
-/// the Direct/CodeMode/JsRepl/first-class-object policy at each branch.
+/// the Direct/CodeMode/JsRepl/code-cell suppression policy at each branch.
 struct DispatchTrace {
     context: ToolDispatchTraceContext,
 }
 
 impl DispatchTrace {
-    fn new(invocation: &ToolInvocation, handler: &dyn AnyToolHandler) -> Self {
-        let start = (!handler.uses_first_class_trace_object(invocation))
+    fn new(invocation: &ToolInvocation) -> Self {
+        let start = (!suppresses_tool_dispatch_trace(invocation))
             .then(|| tool_dispatch_start(invocation))
             .flatten();
         let context = invocation
@@ -286,6 +271,13 @@ impl DispatchTrace {
     fn record_failed(&self, error: &FunctionCallError) {
         self.context.record_failed(error);
     }
+}
+
+fn suppresses_tool_dispatch_trace(invocation: &ToolInvocation) -> bool {
+    // Code-mode `exec` is traced as a CodeCell. Emitting a generic ToolCall
+    // as well would duplicate the same model-visible boundary.
+    matches!(invocation.payload, ToolPayload::Custom { .. })
+        && is_exec_tool_name(&invocation.tool_name)
 }
 
 fn tool_dispatch_start(invocation: &ToolInvocation) -> Option<ToolDispatchStart> {
@@ -524,7 +516,7 @@ impl ToolRegistry {
             return Err(FunctionCallError::Fatal(message));
         }
 
-        let dispatch_trace = DispatchTrace::new(&invocation, handler.as_ref());
+        let dispatch_trace = DispatchTrace::new(&invocation);
 
         if let Some(pre_tool_use_payload) = handler.pre_tool_use_payload(&invocation)
             && let Some(reason) = run_pre_tool_use_hooks(

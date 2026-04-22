@@ -9,6 +9,7 @@ use super::ExecContext;
 use super::PUBLIC_TOOL_NAME;
 use super::build_enabled_tools;
 use super::handle_runtime_response;
+use super::is_exec_tool_name;
 
 pub struct CodeModeExecuteHandler;
 
@@ -80,15 +81,6 @@ impl ToolHandler for CodeModeExecuteHandler {
         matches!(payload, ToolPayload::Custom { .. })
     }
 
-    fn uses_first_class_trace_object(&self, invocation: &ToolInvocation) -> bool {
-        // `exec` is represented by the first-class CodeCell lifecycle. The
-        // dispatch-level ToolCall event would duplicate the same runtime
-        // boundary as a less precise object.
-        matches!(invocation.payload, ToolPayload::Custom { .. })
-            && invocation.tool_name.namespace.is_none()
-            && invocation.tool_name.name == PUBLIC_TOOL_NAME
-    }
-
     async fn handle(&self, invocation: ToolInvocation) -> Result<Self::Output, FunctionCallError> {
         let ToolInvocation {
             session,
@@ -100,9 +92,7 @@ impl ToolHandler for CodeModeExecuteHandler {
         } = invocation;
 
         match payload {
-            ToolPayload::Custom { input }
-                if tool_name.namespace.is_none() && tool_name.name.as_str() == PUBLIC_TOOL_NAME =>
-            {
+            ToolPayload::Custom { input } if is_exec_tool_name(&tool_name) => {
                 self.execute(session, turn, call_id, input).await
             }
             _ => Err(FunctionCallError::RespondToModel(format!(

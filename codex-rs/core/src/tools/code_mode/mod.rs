@@ -46,6 +46,11 @@ pub(crate) const PUBLIC_TOOL_NAME: &str = codex_code_mode::PUBLIC_TOOL_NAME;
 pub(crate) const WAIT_TOOL_NAME: &str = codex_code_mode::WAIT_TOOL_NAME;
 pub(crate) const DEFAULT_WAIT_YIELD_TIME_MS: u64 = codex_code_mode::DEFAULT_WAIT_YIELD_TIME_MS;
 
+/// Returns true for the un-namespaced code-mode `exec` tool.
+pub(crate) fn is_exec_tool_name(tool_name: &ToolName) -> bool {
+    tool_name.namespace.is_none() && tool_name.name == PUBLIC_TOOL_NAME
+}
+
 #[derive(Clone)]
 pub(crate) struct ExecContext {
     pub(super) session: Arc<Session>,
@@ -314,7 +319,7 @@ async fn call_nested_tool(
         tool_name,
         input,
     } = invocation;
-    if tool_name.namespace.is_none() && tool_name.name == PUBLIC_TOOL_NAME {
+    if is_exec_tool_name(&tool_name) {
         return Err(FunctionCallError::RespondToModel(format!(
             "{PUBLIC_TOOL_NAME} cannot invoke itself"
         )));
