@@ -413,7 +413,7 @@ mod tests {
     fn suppresses_only_noncanonical_dispatch_boundaries() {
         assert!(suppresses_tool_dispatch_trace(&invocation(
             codex_code_mode::PUBLIC_TOOL_NAME,
-            None,
+            /*tool_namespace*/ None,
             ToolDispatchRequester::Model {
                 model_visible_call_id: "call-exec".to_string(),
             },
@@ -423,7 +423,7 @@ mod tests {
         )));
         assert!(!suppresses_tool_dispatch_trace(&invocation(
             "custom_tool",
-            None,
+            /*tool_namespace*/ None,
             ToolDispatchRequester::Model {
                 model_visible_call_id: "call-custom".to_string(),
             },
