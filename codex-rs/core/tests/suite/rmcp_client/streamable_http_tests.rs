@@ -760,7 +760,7 @@ async fn wait_for_remote_streamable_http_server(
             headers: Vec::new(),
             body: None,
             timeout_ms: Some(remaining.as_millis().clamp(1, 1_000) as u64),
-            request_id: None,
+            request_id: "buffered-request".to_string(),
             stream_response: false,
         };
         match exec_client.http_request(request).await {
