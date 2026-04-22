@@ -20,7 +20,7 @@ pub(crate) fn auth_manager_for_provider(
     }
 }
 
-fn bearer_auth_provider_from_auth(
+pub(crate) fn bearer_auth_provider_from_auth(
     auth: Option<&CodexAuth>,
     provider: &ModelProviderInfo,
 ) -> codex_protocol::error::Result<BearerAuthProvider> {

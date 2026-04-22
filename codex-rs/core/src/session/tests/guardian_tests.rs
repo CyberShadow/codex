@@ -617,11 +617,10 @@ async fn guardian_subagent_does_not_inherit_parent_exec_policy_rules() {
     );
 
     let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("Test API Key"));
-    let models_manager = Arc::new(ModelsManager::new(
+    let models_manager = Arc::new(crate::test_support::models_manager_with_provider(
         config.codex_home.to_path_buf(),
         auth_manager.clone(),
-        /*model_catalog*/ None,
-        CollaborationModesConfig::default(),
+        config.model_provider.clone(),
     ));
     let plugins_manager = Arc::new(PluginsManager::new(config.codex_home.to_path_buf()));
     let skills_manager = Arc::new(SkillsManager::new(

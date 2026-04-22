@@ -8,3 +8,4 @@ pub use bearer_auth_provider::BearerAuthProvider as CoreAuthProvider;
 pub use provider::ModelProvider;
 pub use provider::SharedModelProvider;
 pub use provider::create_model_provider;
+pub use provider::create_model_provider_with_models_context;

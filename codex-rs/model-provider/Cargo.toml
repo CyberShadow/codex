@@ -19,9 +19,14 @@ codex-aws-auth = { workspace = true }
 codex-client = { workspace = true }
 codex-login = { workspace = true }
 codex-model-provider-info = { workspace = true }
+codex-models-manager = { workspace = true }
 codex-protocol = { workspace = true }
 http = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
+tracing = { workspace = true, features = ["log"] }
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }
+wiremock = { workspace = true }

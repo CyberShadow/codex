@@ -10,10 +10,12 @@ use std::sync::Arc;
 use codex_exec_server::EnvironmentManager;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
+use codex_model_provider::create_model_provider_with_models_context;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_models_manager::bundled_models_response;
 use codex_models_manager::collaboration_mode_presets;
 use codex_models_manager::manager::ModelsManager;
+use codex_models_manager::manager::ModelsManagerContext;
 use codex_protocol::config_types::CollaborationModeMask;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelPreset;
@@ -102,7 +104,20 @@ pub fn models_manager_with_provider(
     auth_manager: Arc<AuthManager>,
     provider: ModelProviderInfo,
 ) -> ModelsManager {
-    ModelsManager::with_provider_for_tests(codex_home, auth_manager, provider)
+    let provider = create_model_provider_with_models_context(
+        provider,
+        Some(auth_manager),
+        ModelsManagerContext {
+            codex_home,
+            config_model_catalog: None,
+            collaboration_modes_config: Default::default(),
+        },
+    );
+    let manager = provider.models_manager();
+    drop(provider);
+    Arc::try_unwrap(manager).unwrap_or_else(|_| {
+        panic!("test models manager should not have additional strong references")
+    })
 }
 
 pub fn get_model_offline(model: Option<&str>) -> String {

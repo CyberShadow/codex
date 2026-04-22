@@ -21,10 +21,11 @@ use codex_app_server_protocol::TurnStatus;
 use codex_exec_server::EnvironmentManager;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
+use codex_model_provider::create_model_provider_with_models_context;
 use codex_model_provider_info::ModelProviderInfo;
-use codex_model_provider_info::OPENAI_PROVIDER_ID;
 use codex_models_manager::collaboration_mode_presets::CollaborationModesConfig;
 use codex_models_manager::manager::ModelsManager;
+use codex_models_manager::manager::ModelsManagerContext;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::CollaborationModeMask;
@@ -222,19 +223,16 @@ pub fn build_models_manager(
     auth_manager: Arc<AuthManager>,
     collaboration_modes_config: CollaborationModesConfig,
 ) -> Arc<ModelsManager> {
-    let openai_models_provider = config
-        .model_providers
-        .get(OPENAI_PROVIDER_ID)
-        .cloned()
-        .unwrap_or_else(|| ModelProviderInfo::create_openai_provider(/*base_url*/ None));
-
-    Arc::new(ModelsManager::new_with_provider(
-        config.codex_home.to_path_buf(),
-        auth_manager,
-        config.model_catalog.clone(),
-        collaboration_modes_config,
-        openai_models_provider,
-    ))
+    let provider = create_model_provider_with_models_context(
+        config.model_provider.clone(),
+        Some(auth_manager),
+        ModelsManagerContext {
+            codex_home: config.codex_home.to_path_buf(),
+            config_model_catalog: config.model_catalog.clone(),
+            collaboration_modes_config,
+        },
+    );
+    provider.models_manager()
 }
 
 impl ThreadManager {
@@ -338,11 +336,16 @@ impl ThreadManager {
             state: Arc::new(ThreadManagerState {
                 threads: Arc::new(RwLock::new(HashMap::new())),
                 thread_created_tx,
-                models_manager: Arc::new(ModelsManager::with_provider_for_tests(
-                    codex_home,
-                    auth_manager.clone(),
+                models_manager: create_model_provider_with_models_context(
                     provider,
-                )),
+                    Some(auth_manager.clone()),
+                    ModelsManagerContext {
+                        codex_home,
+                        config_model_catalog: None,
+                        collaboration_modes_config: CollaborationModesConfig::default(),
+                    },
+                )
+                .models_manager(),
                 environment_manager,
                 skills_manager,
                 plugins_manager,
