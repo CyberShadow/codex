@@ -1956,6 +1956,100 @@ async fn thread_resume_supports_history_and_overrides() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn thread_resume_developer_instructions_override_updates_first_turn() -> Result<()> {
+    let server = responses::start_mock_server().await;
+    let first_body = responses::sse(vec![
+        responses::ev_response_created("resp-1"),
+        responses::ev_assistant_message("msg-1", "Done"),
+        responses::ev_completed("resp-1"),
+    ]);
+    let second_body = responses::sse(vec![
+        responses::ev_response_created("resp-2"),
+        responses::ev_assistant_message("msg-2", "Done"),
+        responses::ev_completed("resp-2"),
+    ]);
+    let response_mock = responses::mount_sse_sequence(&server, vec![first_body, second_body]).await;
+    let codex_home = TempDir::new()?;
+    let stale_instructions = "THREAD_RESUME_STALE_DEVELOPER_INSTRUCTIONS_A";
+    let override_instructions = "THREAD_RESUME_OVERRIDE_DEVELOPER_INSTRUCTIONS_B";
+    create_config_toml_with_developer_instructions(
+        codex_home.path(),
+        &server.uri(),
+        stale_instructions,
+    )?;
+
+    let RestartedThreadFixture {
+        mut mcp, thread_id, ..
+    } = start_materialized_thread_and_restart(codex_home.path(), "seed history").await?;
+
+    let resume_id = mcp
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id,
+            developer_instructions: Some(override_instructions.to_string()),
+            ..Default::default()
+        })
+        .await?;
+    let resume_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(resume_id)),
+    )
+    .await??;
+    let ThreadResumeResponse { thread, .. } = to_response::<ThreadResumeResponse>(resume_resp)?;
+
+    let turn_id = mcp
+        .send_turn_start_request(TurnStartParams {
+            thread_id: thread.id,
+            input: vec![UserInput::Text {
+                text: "resumed turn".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(turn_id)),
+    )
+    .await??;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 2, "expected seed and resumed requests");
+    let request = requests
+        .last()
+        .expect("expected request for resumed thread turn");
+    let developer_texts = request.message_input_texts("developer");
+    assert!(
+        developer_texts
+            .iter()
+            .any(|text| text.contains(stale_instructions)),
+        "expected stale developer instructions in historical context, got {developer_texts:?}"
+    );
+    let developer_text_groups = request.message_input_text_groups("developer");
+    let latest_developer_group = developer_text_groups
+        .last()
+        .expect("expected at least one developer message group");
+    assert!(
+        latest_developer_group
+            .iter()
+            .any(|text| text.contains(override_instructions)),
+        "expected override developer instructions in latest resumed developer update, got {developer_text_groups:?}"
+    );
+    assert!(
+        !latest_developer_group
+            .iter()
+            .any(|text| text.contains(stale_instructions)),
+        "did not expect stale developer instructions in latest resumed developer update, got {developer_text_groups:?}"
+    );
+
+    Ok(())
+}
+
 struct RestartedThreadFixture {
     mcp: McpProcess,
     thread_id: String,
@@ -2148,6 +2242,38 @@ fn create_config_toml(codex_home: &std::path::Path, server_uri: &str) -> std::io
 model = "gpt-5.3-codex"
 approval_policy = "never"
 sandbox_mode = "read-only"
+
+model_provider = "mock_provider"
+
+[features]
+personality = true
+general_analytics = true
+
+[model_providers.mock_provider]
+name = "Mock provider for test"
+base_url = "{server_uri}/v1"
+wire_api = "responses"
+request_max_retries = 0
+stream_max_retries = 0
+"#
+        ),
+    )
+}
+
+fn create_config_toml_with_developer_instructions(
+    codex_home: &std::path::Path,
+    server_uri: &str,
+    developer_instructions: &str,
+) -> std::io::Result<()> {
+    let config_toml = codex_home.join("config.toml");
+    std::fs::write(
+        config_toml,
+        format!(
+            r#"
+model = "gpt-5.2-codex"
+approval_policy = "never"
+sandbox_mode = "read-only"
+developer_instructions = "{developer_instructions}"
 
 model_provider = "mock_provider"
 

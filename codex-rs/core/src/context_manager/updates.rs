@@ -86,6 +86,25 @@ fn build_collaboration_mode_update_item(
     }
 }
 
+fn build_thread_developer_instructions_update_item(
+    previous: Option<&TurnContextItem>,
+    next: &TurnContext,
+) -> Option<DeveloperInstructions> {
+    let previous_developer_instructions = previous
+        .and_then(|item| item.developer_instructions.as_deref())
+        .filter(|instructions| !instructions.is_empty());
+    let next_developer_instructions = next
+        .developer_instructions
+        .as_deref()
+        .filter(|instructions| !instructions.is_empty());
+
+    if previous_developer_instructions == next_developer_instructions {
+        return None;
+    }
+
+    next_developer_instructions.map(DeveloperInstructions::new)
+}
+
 pub(crate) fn build_realtime_update_item(
     previous: Option<&TurnContextItem>,
     previous_turn_settings: Option<&PreviousTurnSettings>,
@@ -220,6 +239,7 @@ pub(crate) fn build_settings_update_items(
         // any other context diffs on this turn.
         build_model_instructions_update_item(previous_turn_settings, next),
         build_permissions_update_item(previous, next, exec_policy),
+        build_thread_developer_instructions_update_item(previous, next),
         build_collaboration_mode_update_item(previous, next),
         build_realtime_update_item(previous, previous_turn_settings, next),
         build_personality_update_item(previous, next, personality_feature_enabled),

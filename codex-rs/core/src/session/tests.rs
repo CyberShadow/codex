@@ -4626,6 +4626,29 @@ async fn build_settings_update_items_omits_environment_item_when_disabled() {
 }
 
 #[tokio::test]
+async fn build_settings_update_items_emits_thread_developer_instructions_update() {
+    let (session, mut previous_context) = make_session_and_context().await;
+    previous_context.developer_instructions = Some("thread developer instructions A".to_string());
+    let mut current_context = previous_context
+        .with_model(
+            previous_context.model_info.slug.clone(),
+            &session.services.models_manager,
+        )
+        .await;
+    current_context.developer_instructions = Some("thread developer instructions B".to_string());
+
+    let update_items = session
+        .build_settings_update_items(
+            Some(&previous_context.to_turn_context_item()),
+            &current_context,
+        )
+        .await;
+
+    let developer_texts = developer_input_texts(&update_items);
+    assert_eq!(developer_texts, vec!["thread developer instructions B"]);
+}
+
+#[tokio::test]
 async fn build_settings_update_items_emits_realtime_start_when_session_becomes_live() {
     let (session, previous_context) = make_session_and_context().await;
     let previous_context = Arc::new(previous_context);
